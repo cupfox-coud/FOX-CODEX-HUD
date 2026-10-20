@@ -1,5 +1,17 @@
 # Changelog
 
+## FOX CODEX HUD 1.3.0-beta.8.corner.12 — 2026-10-20
+
+Windows corner edition with soft vector halos, severity-dependent pulses, timeout ripple contours,
+smooth latency colors, per-route failure/recovery notices and a moving activity light.
+Animations run independently of telemetry at a maximum of 25 FPS (10 FPS in remote sessions),
+pause for tray menus, and respect Windows animation preferences. No animation library or extra probe traffic.
+New installations default to the compact, translucent, click-through corner card.
+
+Includes weekly quota, public reset radar, two local Clash/Mihomo route probes, the latest
+20 timed model-response average, long-session recognition and the GDI+ tiny-arc fix.
+Preserves the upstream MIT license and existing local data paths for upgrades.
+
 ## 1.3.0-beta.8 — 2026-10-13
 
 Windows data is shared through `%USERPROFILE%\.codex-token-hud`, avoiding MSIX AppData redirection between Codex and Task Scheduler. Existing choices migrate without stale telemetry; legacy watcher actions migrate as well. Windows watcher startup is owned by Task Scheduler, so installers and terminals can return normally. Source-process integration checks wait for readiness on cold macOS runtimes.

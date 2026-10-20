@@ -149,7 +149,9 @@ class Lifecycle:
         self.dismissed = False
         self.closing = False
 
-    def step(self, targets, hud_running, owned, now):
+    def step(self, targets, hud_running, owned, now, keep_open=False):
+        if keep_open and not targets:
+            targets = ["resident"]
         if targets:
             self.empty_since = None
             if self.active_since is None:
@@ -326,7 +328,7 @@ def register(config, value, turn_on):
             path.unlink(missing_ok=True)
 
 
-def configure(command, runtime, codex_home, turn_on, config=None, extra=()):
+def configure(command, runtime, codex_home, turn_on, config=None, extra=(), resident=False):
     config = config or default_config()
     installation = str(Path(command[0] if getattr(sys, "frozen", False) or len(command) == 1 else next(v for v in command[1:] if v.endswith(".py"))).resolve())
     saved = read_selection(config)
@@ -338,6 +340,7 @@ def configure(command, runtime, codex_home, turn_on, config=None, extra=()):
     if saved.get("enabled") and saved.get("installation") != installation:
         raise RuntimeError("Application following is enabled for another copy; disable it there first")
     value = {"enabled": bool(turn_on), "installation": installation, "command": command,
+             "resident": bool(resident or saved.get("resident", False)),
              "runtime": str(Path(runtime).resolve()), "codex_home": str(Path(codex_home).resolve()),
              "client_executables": [str(Path(p).resolve()) for p in extra] or saved.get("client_executables", [])}
     register(config, value, turn_on)
@@ -388,7 +391,7 @@ def watch(config, duration=0):
             status = read_selection(runtime / "status.json")
             external = bool(process_alive(status.get("pid")) and time.time() * 1000 - status.get("updated_at_ms", 0) < 5000)
             running = (child is not None and child.poll() is None) or external
-            action = state.step(targets, running, child is not None, now)
+            action = state.step(targets, running, child is not None, now, keep_open=value.get("resident", False))
             if action == "start" and now >= retry_at:
                 owner = uuid.uuid4().hex
                 try:
@@ -404,6 +407,7 @@ def watch(config, duration=0):
                 atomic_json(runtime / "app-close.request.json", {"owner": owner})
             atomic_json(watch_folder / "status.json", {"pid": os.getpid(), "active_clients": len(targets),
                         "desktop_running": any(kind == "desktop" for _, kind in targets),
+                        "resident": bool(value.get("resident", False)),
                         "managed_pid": child.pid if child and child.poll() is None else None,
                         "dismissed": state.dismissed, "last_error": error, "updated_at_ms": time.time() * 1000})
             persistent = value.get("persistent_config") and enabled(config=Path(value["persistent_config"]))
@@ -431,6 +435,7 @@ def main(argv=None):
     parser.add_argument("--runtime", type=Path)
     parser.add_argument("--codex-home", type=Path, default=Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex"))
     parser.add_argument("--duration", type=float, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--resident", action="store_true", help="Keep the HUD visible even when all clients close")
     parser.add_argument("--interface", choices=("auto", "overlay", "dashboard"), default="auto")
     parser.add_argument("--client-executable", type=Path, action="append", default=[], help="Also follow this exact executable path")
     args = parser.parse_args(argv)
@@ -458,7 +463,7 @@ def main(argv=None):
         finally:
             signal.signal(signal.SIGINT, previous_sigint)
             lease.unlink(missing_ok=True)
-    configure(command, runtime, args.codex_home, args.enable, args.config, args.client_executable)
+    configure(command, runtime, args.codex_home, args.enable, args.config, args.client_executable, resident=args.resident)
     print("Application following enabled" if args.enable else "Application following disabled")
     return 0
 

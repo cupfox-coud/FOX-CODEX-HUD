@@ -10,8 +10,8 @@ $taskAssemblyVersion = ($taskVersion -split '-')[0] + '.0'
 $taskAssemblyInfo = Join-Path $taskOutput 'AssemblyInfo.g.cs'
 @"
 using System.Reflection;
-[assembly: AssemblyTitle("Codex Token HUD")]
-[assembly: AssemblyProduct("Codex Token HUD")]
+[assembly: AssemblyTitle("FOX CODEX HUD")]
+[assembly: AssemblyProduct("FOX CODEX HUD")]
 [assembly: AssemblyDescription("Local token speed and cache measurements for Codex Desktop on Windows")]
 [assembly: AssemblyVersion("$taskAssemblyVersion")]
 [assembly: AssemblyFileVersion("$taskAssemblyVersion")]
@@ -27,7 +27,7 @@ $taskArgs = @('/nologo', '/target:winexe', '/platform:anycpu', '/optimize+',
     "/out:$taskExe", "/win32manifest:$taskRoot\app.manifest", '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll',
     '/r:System.Web.Extensions.dll', '/r:Microsoft.CSharp.dll',
     "/r:$taskWpf\UIAutomationClient.dll", "/r:$taskWpf\UIAutomationTypes.dll", "/r:$taskWpf\WindowsBase.dll",
-    "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", $taskAssemblyInfo)
+    "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", "$taskRoot\ActivityDisplay.cs", "$taskRoot\CornerDisplay.cs", "$taskRoot\ResetRadarDisplay.cs", "$taskRoot\ResetNotifications.cs", $taskAssemblyInfo)
 & $taskCsc @taskArgs
 if ($LASTEXITCODE -ne 0) { throw 'HUD compilation failed. Stop this copy of the HUD before rebuilding it.' }
 if ($PythonExecutable) {

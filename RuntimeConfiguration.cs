@@ -9,6 +9,10 @@ namespace CodexTokenHud
     internal sealed class RuntimeConfiguration
     {
         internal string Folder, DataDirectory, CodexHome, Pythonw;
+        internal bool CornerMode;
+        internal bool ResetAlerts = true;
+        internal string CornerMonitor = "";
+        internal double CornerOpacity = 0.78;
         internal string Runtime { get { return Path.Combine(DataDirectory, "runtime"); } }
         internal string Layout { get { return Path.Combine(DataDirectory, "user-layout.json"); } }
 
@@ -24,6 +28,10 @@ namespace CodexTokenHud
             if (!File.Exists(Path.Combine(result.DataDirectory, "settings.json")) && string.IsNullOrWhiteSpace(customData))
                 userSettings = Json.Read(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexTokenHud", "settings.json"));
             foreach (var item in userSettings) settings[item.Key] = item.Value;
+            result.CornerMode = !Json.Text(settings, "corner_mode").Equals("False", StringComparison.OrdinalIgnoreCase);
+            result.ResetAlerts = !Json.Text(settings, "reset_alerts").Equals("False", StringComparison.OrdinalIgnoreCase);
+            result.CornerMonitor = Json.Text(settings, "corner_monitor");
+            result.CornerOpacity = Math.Max(0.45, Math.Min(1.0, Json.Number(settings, "corner_opacity") ?? 0.78));
             string home = Json.Text(settings, "codex_home");
             if (string.IsNullOrWhiteSpace(home)) home = Environment.GetEnvironmentVariable("CODEX_HOME");
             if (string.IsNullOrWhiteSpace(home)) home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
@@ -109,6 +117,7 @@ namespace CodexTokenHud
         {
             string args = "-I -X utf8 " + Quote(Path.Combine(Folder, "app_follow.py")) +
                 (enabled ? " --enable" : " --disable") + " --windows-exe " + Quote(Path.Combine(Folder, "CodexTokenHud.exe")) +
+                (CornerMode ? " --resident" : "") +
                 " --config " + Quote(Path.Combine(DataDirectory, "app-follow", "config.json")) +
                 " --runtime " + Quote(Runtime) + " --codex-home " + Quote(CodexHome);
             using (var process = Process.Start(new ProcessStartInfo(Pythonw, args) {
@@ -120,6 +129,16 @@ namespace CodexTokenHud
                 if (!process.WaitForExit(30000)) { process.Kill(); throw new InvalidOperationException("Application-follow setup timed out."); }
                 if (process.ExitCode != 0) throw new InvalidOperationException(errors.Result);
             }
+        }
+
+        internal void SaveCornerSettings()
+        {
+            var settings = Json.Read(Path.Combine(DataDirectory, "settings.json"));
+            settings["corner_mode"] = CornerMode;
+            settings["corner_monitor"] = CornerMonitor;
+            settings["corner_opacity"] = CornerOpacity;
+            settings["reset_alerts"] = ResetAlerts;
+            Json.Write(Path.Combine(DataDirectory, "settings.json"), settings);
         }
 
         internal bool HasLegacyLogonStartup()

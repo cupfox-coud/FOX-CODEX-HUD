@@ -1,0 +1,175 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+
+namespace CodexTokenHud
+{
+    // Third-party schedules and the signed-in account's weekly window are separate facts.
+    internal sealed class ResetRadarDisplay
+    {
+        internal string Title = "重置雷达";
+        internal string Countdown = "正在同步";
+        internal string Detail = "等待公开排期";
+        internal string Hint = "公开排期来自 Did Codex Reset；时间可能变化，不代表本账号已到账。";
+        internal string State = "loading";
+        internal bool Alert;
+        internal string UpcomingId = "";
+        internal double? UpcomingStartMs;
+        internal double? UpcomingEndMs;
+
+        private const double MaxEpochMs = 253402300799999;
+        private const double DayMs = 86400000;
+
+        private static double? Number(Dictionary<string, object> value, string key)
+        {
+            if (Json.Get(value, key) is bool) return null;
+            double? number = Json.Number(value, key);
+            return number.HasValue && !double.IsNaN(number.Value) && !double.IsInfinity(number.Value) ? number : null;
+        }
+
+        private static bool Timestamp(double? value)
+        { return value.HasValue && value.Value > 0 && value.Value <= MaxEpochMs; }
+
+        private static bool Fresh(double? value, double nowMs, double maxAgeMs)
+        { return Timestamp(value) && value.Value <= nowMs + 30000 && nowMs - value.Value <= maxAgeMs; }
+
+        private static string Duration(double durationMs)
+        {
+            // Inputs have already been bounded to valid Unix dates; clamp before casting.
+            long seconds = (long)Math.Max(0, Math.Min(MaxEpochMs / 1000, Math.Ceiling(durationMs / 1000)));
+            long days = seconds / 86400;
+            if (days >= 100) return days.ToString(CultureInfo.InvariantCulture) + "天";
+            if (days > 0) return days.ToString(CultureInfo.InvariantCulture) + "天" + ((seconds % 86400) / 3600).ToString(CultureInfo.InvariantCulture) + "时";
+            if (seconds >= 3600) return (seconds / 3600).ToString("00", CultureInfo.InvariantCulture) + ":" +
+                ((seconds % 3600) / 60).ToString("00", CultureInfo.InvariantCulture) + ":" + (seconds % 60).ToString("00", CultureInfo.InvariantCulture);
+            return (seconds / 60).ToString("00", CultureInfo.InvariantCulture) + ":" + (seconds % 60).ToString("00", CultureInfo.InvariantCulture);
+        }
+
+        private static DateTime LocalDate(double timestamp)
+        { return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(timestamp).ToLocalTime(); }
+
+        private static string OfficialWeekly(Dictionary<string, object> data, double nowMs)
+        {
+            var quota = Json.Object(data, "account_quota");
+            if (Json.Text(quota, "state") != "ok" || !Fresh(Number(quota, "updated_at_ms"), nowMs, 900000)) return null;
+            double? earliest = null;
+            foreach (var window in Json.List(quota, "windows"))
+            {
+                if (Number(window, "window_minutes") != 10080) continue;
+                double? seconds = Number(window, "resets_at");
+                if (!seconds.HasValue || seconds.Value <= 0 || seconds.Value > MaxEpochMs / 1000) continue;
+                double resetMs = seconds.Value * 1000;
+                if (resetMs <= nowMs || resetMs - nowMs > 7 * DayMs + 30000) continue;
+                if (!earliest.HasValue || resetMs < earliest.Value) earliest = resetMs;
+            }
+            return earliest.HasValue ? "周重置 " + Duration(earliest.Value - nowMs) : null;
+        }
+
+        internal static ResetRadarDisplay Read(Dictionary<string, object> data, double nowMs)
+        {
+            var result = new ResetRadarDisplay();
+            if (!Timestamp(nowMs) || !Fresh(Number(data, "updated_at_ms"), nowMs, 6000))
+            {
+                result.State = "paused";
+                result.Countdown = "采集暂停";
+                result.Detail = "等待重新同步";
+                result.Hint += " 采集心跳已失效，排期与官方窗口均停止显示倒计时。";
+                return result;
+            }
+
+            string weekly = OfficialWeekly(data, nowMs);
+            if (weekly != null) result.Hint += " “周重置”来自当前账户官方周额度窗口，与公共额外重置排期不同。";
+            var radar = Json.Object(data, "reset_radar");
+            string state = Json.Text(radar, "state");
+            string reason = null;
+            if (state == "loading" || radar == null)
+            { result.State = "loading"; result.Countdown = "正在同步"; reason = "等待公开排期"; }
+            else if (state == "limited")
+            { result.State = "limited"; result.Countdown = "请求受限"; reason = "稍后自动重试"; }
+            else if (state == "unavailable")
+            { result.State = "unavailable"; result.Countdown = "暂时离线"; reason = "公开排期暂不可用"; }
+            else if (state == "stale" || !Fresh(Number(radar, "fetched_at_ms"), nowMs, 900000) ||
+                     !Fresh(Number(radar, "source_updated_at_ms"), nowMs, 1800000))
+            { result.State = "stale"; result.Countdown = "数据过期"; reason = "等待排期更新"; }
+            else if (state != "ok")
+            { result.State = "unavailable"; result.Countdown = "状态待确认"; reason = "公开排期暂不可用"; }
+            if (reason != null)
+            {
+                result.Detail = weekly ?? reason;
+                result.Hint += " " + reason + "；旧排期不触发提醒。";
+                return result;
+            }
+
+            var upcoming = Json.Object(radar, "upcoming");
+            if (upcoming == null)
+            {
+                string scheduleReason = Json.Text(radar, "reason");
+                if (scheduleReason == "schedule_elapsed_unconfirmed")
+                {
+                    result.State = "expired";
+                    result.Countdown = "等待确认";
+                    result.Detail = "计划时间已过 · 未确认";
+                    result.Hint += " 预告时间或窗口已过，仍需确认事件完成和本账号到账。";
+                    return result;
+                }
+                if (scheduleReason == "schedule_time_unknown" || scheduleReason == "invalid_schedule")
+                {
+                    result.State = "unknown";
+                    result.Countdown = "时间待确认";
+                    result.Detail = "预告未给出明确时刻";
+                    result.Hint += " 公开预告时间不明确，暂不提供倒计时或提醒。";
+                    return result;
+                }
+                result.State = "none";
+                result.Countdown = "暂无排期";
+                result.Detail = weekly ?? "尚无新的重置预告";
+                return result;
+            }
+
+            string precision = Json.Text(upcoming, "precision");
+            double? start = Number(upcoming, "start_ms");
+            double? end = Number(upcoming, "end_ms");
+            bool endWasProvided = Json.Get(upcoming, "end_ms") != null;
+            if (!Timestamp(start) || (endWasProvided && (!Timestamp(end) || end.Value < start.Value)) ||
+                (precision != "exact" && precision != "window" && precision != "date") ||
+                (precision == "window" && (!Timestamp(end) || end.Value <= start.Value)))
+            {
+                result.State = "unknown";
+                result.Countdown = "时间待确认";
+                result.Detail = weekly ?? "预告未给出明确时刻";
+                return result;
+            }
+
+            result.UpcomingId = Json.Text(upcoming, "id");
+            result.UpcomingStartMs = start;
+            result.UpcomingEndMs = end;
+            bool expired = precision == "exact" ? nowMs >= start.Value : end.HasValue ? nowMs >= end.Value :
+                precision == "date" && LocalDate(nowMs).Date > LocalDate(start.Value).Date;
+            if (expired)
+            {
+                result.State = "expired";
+                result.Countdown = "等待确认";
+                result.Detail = "计划时间已过 · 未确认";
+                result.Hint += " 预告时间或窗口已过，仍需确认事件完成和本账号到账。";
+                return result;
+            }
+
+            if (precision == "date")
+            {
+                result.State = "date";
+                result.Countdown = LocalDate(nowMs).Date == LocalDate(start.Value).Date ? "预计今日" : LocalDate(start.Value).ToString("MM月dd日", CultureInfo.InvariantCulture);
+                result.Detail = "日期预告 · 时刻未定";
+                result.Hint += " 此预告只有日期，不提供精确到账倒计时。";
+                return result;
+            }
+
+            bool windowOpen = precision == "window" && nowMs >= start.Value;
+            result.State = windowOpen ? "window" : "scheduled";
+            result.Countdown = windowOpen ? "窗口进行中" : Duration(start.Value - nowMs);
+            result.Detail = windowOpen ? "预计窗口 · 等待确认" : precision == "window" ? "距预计窗口开始" : "距计划时间 · 非到账";
+            result.Alert = windowOpen || start.Value - nowMs <= 1800000;
+            result.Hint += " " + (precision == "window" ? "这是预计时间范围，不是精确到账时刻。" : "这是公开计划时间，不是本账号额度已重置的确认。");
+            return result;
+        }
+    }
+}

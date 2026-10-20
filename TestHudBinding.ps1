@@ -14,7 +14,7 @@ $taskExe = Join-Path $taskOutput 'HudBindingTests.exe'
 $taskArgs = @('/nologo', '/target:exe', '/platform:anycpu', '/main:HudBindingTests',
     "/out:$taskExe", '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll', '/r:Microsoft.CSharp.dll',
     "/r:$taskWpf\UIAutomationClient.dll", "/r:$taskWpf\UIAutomationTypes.dll", "/r:$taskWpf\WindowsBase.dll",
-    "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", "$taskRoot\tests\HudBindingTests.cs")
+    "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", "$taskRoot\ActivityDisplay.cs", "$taskRoot\CornerDisplay.cs", "$taskRoot\ResetRadarDisplay.cs", "$taskRoot\ResetNotifications.cs", "$taskRoot\tests\HudBindingTests.cs")
 & $taskCsc @taskArgs
 if ($LASTEXITCODE -ne 0) { throw 'HUD binding test compilation failed.' }
 & $taskExe $taskRoot $taskPythonw

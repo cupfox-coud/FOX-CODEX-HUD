@@ -1,4 +1,4 @@
-"""Read-only Codex usage measurements. No credentials, network, or conversation exports."""
+"""Read-only local measurements with optional official account-quota lookup."""
 from __future__ import annotations
 
 import argparse
@@ -6,6 +6,7 @@ import collections
 from contextlib import closing
 import datetime as dt
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -57,6 +58,9 @@ class Measurements:
         self.request_boundary: float | None = None
         self.pending_calls: set[str] = set()
         self.stage = "idle"
+        # A tail can begin halfway through historical output. Only lifecycle events
+        # establish whether a turn is active; tool/token records cannot prove it.
+        self.turn_active: bool | None = None
         self.output_total = 0
         self.reasoning_total = 0
         self.turn_output = 0
@@ -69,8 +73,14 @@ class Measurements:
         self.last_usage_at: float = 0
         self.event_at: float = 0
         self.turn_started_at: float | None = None
+        self.response_durations: collections.deque[dict] = collections.deque(maxlen=20)
+        # A separate replay can retain response timing across a truncated tail,
+        # without adding historical usage to the live token counters.
+        self.response_history: Measurements | None = None
 
     def feed(self, event: dict) -> None:
+        if self.response_history is not None:
+            self.response_history.feed(event)
         kind = event.get("type")
         p = event.get("payload") or {}
         if not isinstance(p, dict):
@@ -84,7 +94,10 @@ class Measurements:
             self.model = p.get("model") or self.model
             return
         if kind == "event_msg" and event_type in ("task_started", "turn_started"):
+            if self.turn_active and p.get("turn_id") and self.turn_id == p.get("turn_id"):
+                return  # Repeated start notifications must not shorten a task.
             self.turn_id = p.get("turn_id")
+            self.turn_active = True
             self.turn_started_at = at
             self.request_boundary = at
             self.model_start = None
@@ -94,7 +107,11 @@ class Measurements:
             self.turn_generation_ms = 0
             self.sample_count = 0
             return
-        if kind == "event_msg" and event_type in ("task_complete", "task_completed", "turn_complete", "turn_aborted"):
+        if kind == "event_msg" and event_type in (
+                "task_complete", "task_completed", "turn_complete", "turn_completed", "task_aborted", "turn_aborted"):
+            if p.get("turn_id") and self.turn_id and p["turn_id"] != self.turn_id:
+                return  # A delayed completion from an older turn cannot end the current one.
+            self.turn_active = False
             self.stage = "idle"
             self.pending_calls.clear()
             return
@@ -110,17 +127,19 @@ class Measurements:
                     # Item timings can arrive late; never attach an old item to the next response.
                     if start >= self.last_usage_at:
                         self.model_start = min(self.model_start or start, start)
-                        self.stage = "generating"
+                        if self.turn_active is not False:
+                            self.stage = "generating"
             return
 
         if kind == "response_item":
             call_id = p.get("call_id")
             if event_type in ("function_call", "custom_tool_call") and call_id:
-                self.pending_calls.add(call_id)
-                self.stage = "tools"
+                if self.turn_active is not False:
+                    self.pending_calls.add(call_id)
+                    self.stage = "tools"
             elif event_type in ("function_call_output", "custom_tool_call_output"):
                 self.pending_calls.discard(call_id)
-                if not self.pending_calls:
+                if not self.pending_calls and self.turn_active is not False:
                     self.request_boundary = at
                     self.stage = "generating"
             elif event_type == "message" and p.get("role") == "user":
@@ -172,6 +191,12 @@ class Measurements:
         basis = "stream" if self.model_start is not None else "request"
         start = self.model_start if self.model_start is not None else self.request_boundary
         duration = at - start if start is not None else None
+        # Response latency includes waiting for model output, but begins again
+        # after tool results. It is not the duration of the whole user task.
+        response_start = self.request_boundary if self.request_boundary is not None else self.model_start
+        response_ms = at - response_start if response_start is not None else None
+        if self.turn_active is not False and output and response_ms is not None and math.isfinite(response_ms) and response_ms > 0:
+            self.response_durations.append({"duration_ms": response_ms, "completed_at_ms": at})
         # Old history may start halfway through a response. Preserve usage without inventing speed.
         rate = output * 1000 / duration if duration is not None and duration >= 50 and output else None
         self.last = {
@@ -200,11 +225,49 @@ class Measurements:
         self.request_boundary = at
 
     def snapshot(self) -> dict:
+        durations = self.response_history.response_durations if self.response_history is not None else self.response_durations
         return {"model": self.model, "stage": self.stage, "last": self.last,
+                "response_duration": {
+                    "mean_ms": sum(row["duration_ms"] for row in durations) / len(durations) if durations else None,
+                    "count": len(durations), "limit": 20,
+                    "last_ms": durations[-1]["duration_ms"] if durations else None},
+                "turn_active": self.turn_active,
                 "turn_id": self.turn_id, "turn_output_tokens": self.turn_output,
                 "sample_count": self.sample_count, "output_total": self.output_total,
                 "turn_started_at_ms": self.turn_started_at,
                 "last_event_at_ms": self.event_at}
+
+
+def reverse_small_lines(stream, end: int, chunk_bytes: int = 64 * 1024,
+                        line_limit: int = 256 * 1024, include_gaps: bool = False):
+    """Read prefix lines newest-first with bounded memory, skipping giant media rows."""
+    remainder = b""
+    position = end
+    while position:
+        size = min(position, chunk_bytes)
+        position -= size
+        stream.seek(position)
+        parts = stream.read(size).split(b"\n")
+        if len(parts) == 1:
+            if remainder is not None:
+                remainder = parts[0] + remainder
+                if len(remainder) > line_limit:
+                    remainder = None
+            continue
+        if remainder is not None and len(parts[-1]) + len(remainder) <= line_limit:
+            yield parts[-1] + remainder
+        elif include_gaps:
+            yield None
+        for line in reversed(parts[1:-1]):
+            if len(line) <= line_limit:
+                yield line
+            elif include_gaps:
+                yield None
+        remainder = parts[0]
+    if remainder and len(remainder) <= line_limit:
+        yield remainder
+    elif include_gaps and (remainder is None or remainder):
+        yield None
 
 
 class SessionTail:
@@ -228,6 +291,108 @@ class SessionTail:
         self.partial = b""
         self.initialized = False
         self.anchor = b""
+
+    def restore_lifecycle(self, stream, end: int) -> None:
+        """Recover explicit turn state before the sample tail, without replaying usage."""
+        starts = ("task_started", "turn_started")
+        finishes = ("task_complete", "task_completed", "turn_complete", "turn_completed",
+                    "task_aborted", "turn_aborted")
+        endings = {}
+        for line in reverse_small_lines(stream, end):
+            if b'"event_msg"' not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(record, dict) or record.get("type") != "event_msg":
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            kind = payload.get("type")
+            turn_id = payload.get("turn_id")
+            if turn_id is not None and not isinstance(turn_id, str):
+                continue
+            if kind in finishes:
+                endings.setdefault(turn_id, record)
+            elif kind in starts:
+                self.measurements.feed(record)
+                # A late completion for an older turn must not end this turn.
+                ending = next((e for key, e in endings.items() if not key or not turn_id or key == turn_id), None)
+                if ending:
+                    self.measurements.feed(ending)
+                break
+        else:
+            if endings:
+                self.measurements.feed(next(iter(endings.values())))
+        # The skipped prefix establishes lifecycle only. It cannot establish a
+        # response timing boundary or contribute historical token counts.
+        self.measurements.request_boundary = None
+        self.measurements.model_start = None
+
+    def restore_response_history(self, stream, end: int) -> None:
+        """Restore up to 20 timed responses using small metadata rows only.
+
+        Read more history if the first batch has missing timings or duplicates.
+        Usage replay is isolated from the live token/speed counters.
+        """
+        records = []
+        usage_rows = 0
+        history = None
+        def replay():
+            result = Measurements()
+            for row in reversed(records):
+                if row is None:
+                    # An oversized row may be a tool result or user message.
+                    # Do not bridge an unknown timing boundary with a guess.
+                    result.request_boundary = None
+                    result.model_start = None
+                    result.pending_calls.clear()
+                else:
+                    result.feed(row)
+            return result
+
+        # Tool results commonly carry multi-MB images. Preserve their timing
+        # boundaries while bounding each decoded row, then discard all bodies.
+        for line in reverse_small_lines(stream, end, line_limit=16 * 1024 * 1024, include_gaps=True):
+            if line is None:
+                records.append(None)
+                continue
+            try:
+                record = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            kind, payload = record.get("type"), record.get("payload")
+            if kind not in ("event_msg", "response_item", "token_usage_record") or not isinstance(payload, dict):
+                continue
+            event_type = payload.get("type")
+            if kind == "event_msg" and event_type not in (
+                    "task_started", "turn_started", "task_complete", "task_completed", "turn_complete",
+                    "turn_completed", "task_aborted", "turn_aborted", "item_completed", "token_count"):
+                continue
+            if kind == "response_item" and event_type not in (
+                    "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output", "message"):
+                continue
+            # Retain timing metadata, never message bodies or tool output.
+            slim = {k: payload[k] for k in ("type", "turn_id", "call_id", "role", "response_id", "usage",
+                    "thread_token_usage", "turn_token_usage", "info", "started_at_ms") if k in payload}
+            if isinstance(payload.get("item"), dict):
+                slim["item"] = {"type": payload["item"].get("type")}
+            records.append({"type": kind, "timestamp": record.get("timestamp"), "payload": slim})
+            if kind == "token_usage_record" or event_type == "token_count":
+                usage_rows += 1
+            else:
+                continue
+            if usage_rows % 64 == 0:
+                history = replay()
+                if len(history.response_durations) == 20:
+                    break
+        else:
+            history = replay()
+        self.measurements.response_history = history or Measurements()
 
     def update(self) -> None:
         try:
@@ -261,6 +426,8 @@ class SessionTail:
                     if self.offset:
                         f.readline()  # discard an incomplete first JSON line
                         self.offset = f.tell()
+                        self.restore_lifecycle(f, self.offset)
+                        self.restore_response_history(f, self.offset)
                     self.initialized = True
                 f.seek(self.offset)
                 data = f.read(16 * 1024 * 1024)
@@ -398,7 +565,8 @@ def atomic_json(path: Path, value: dict) -> None:
 
 
 def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once: bool = False,
-            dashboard_enabled: bool = False) -> dict | None:
+            dashboard_enabled: bool = False, account_quota: bool = False,
+            network_latency: bool = False, reset_radar: bool = False) -> dict | None:
     from history import SessionCatalog
     catalog = SessionCatalog(codex_home)
     repository = catalog.repository
@@ -406,6 +574,18 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
         from dashboard import start_server
         start_server(codex_home, runtime, native_enabled=os.name == "nt")
     tails = TailCache()
+    quota = None
+    if account_quota and not once:
+        from quota import QuotaPoller
+        quota = QuotaPoller(codex_home)
+    latency = None
+    if network_latency and not once:
+        from latency import LatencyPoller
+        latency = LatencyPoller(interval=30)
+    radar = None
+    if reset_radar and not once:
+        from reset_radar import ResetRadarPoller
+        radar = ResetRadarPoller(interval=180)
     matched_at = 0.0
     selection_key = None
     last_refresh_id = None
@@ -413,79 +593,97 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
     last_published = 0.0
     last_payload = None
     refresh_result = None
-    while True:
-        if parent_pid and os.name == "nt":
-            import ctypes
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
-            kernel.OpenProcess.restype = ctypes.c_void_p
-            kernel.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
-            kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
-            handle = kernel.OpenProcess(0x1000, False, parent_pid)
-            if not handle:
-                return None
-            code = ctypes.c_ulong()
-            alive = kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259
-            kernel.CloseHandle(handle)
-            if not alive:
-                return None
-        elif parent_pid:
-            try:
-                os.kill(parent_pid, 0)
-            except ProcessLookupError:
-                return None
-            except PermissionError:
-                pass
-        selection = read_selection(runtime / "selection.json")
-        title = selection.get("title", "")
-        selected_id = selection.get("thread_id")
-        refresh_id = selection.get("refresh_id")
-        force = refresh_id != last_refresh_id
-        last_refresh_id = refresh_id
-        catalog.refresh(force=force or once)
-        key = (title, selected_id)
-        if key != selection_key or force or time.monotonic() - matched_at >= 0.5 or once:
-            matches = catalog.title_matches(title) if title else []
-            selection_key = key
-            matched_at = time.monotonic()
-        selected = next((r for r in matches if r["id"] == selected_id), None)
-        if selection.get("binding_mode") == "activity":
-            rows = list(catalog.rows.values())
-            newest = max((r["updated_at_ms"] for r in rows), default=None)
-            matches = [r for r in rows if r["updated_at_ms"] == newest]
-            selected = matches[0] if len(matches) == 1 else None
-            title = selected["title"] if selected else ""
-        if selection.get("binding_mode") == "manual" and selected_id:
-            selected = catalog.rows.get(selected_id)
-        if selected is None and len(matches) == 1 and selection.get("binding_mode") != "manual":
-            selected = matches[0]
-        status = "ok" if selected else "ambiguous" if len(matches) > 1 else "unbound"
-        tail = tails.update(selected, force) if selected else None
-        metrics = tail.measurements.snapshot() if tail else None
-        if force:
-            refresh_result = {"request_id": refresh_id, "completed_at_ms": time.time() * 1000,
-                              "state": "ok" if tail and tail.source_state == "ok" else
-                              "unavailable" if tail else status,
-                              "sample_at_ms": tail.measurements.last_usage_at if tail else None}
-        saved_range = read_selection(runtime / "range-result.json")
-        range_result = saved_range if selected and saved_range.get("thread_id") == selected["id"] else None
-        result = {"schema_version": 2, "collector_pid": os.getpid(),
-                  "repository_state": repository.state,
-                  "binding": status, "binding_mode": selection.get("binding_mode", "auto"),
-                  "thread_id": selected["id"] if selected else None,
-                  "title": title, "metrics": metrics, "source": tail.source() if tail else None,
-                  "refresh": refresh_result, "range": range_result,
-                  "matches": [{k: r.get(k) for k in ("id", "title", "model", "updated_at")} for r in matches],
-                  "threads": [{"id": r["id"], "title": r["title"], "model": r["model"]} for r in list(catalog.rows.values())[:80]]}
-        if once:
-            result["updated_at_ms"] = time.time() * 1000
-            return result
-        if result != last_payload or time.monotonic() - last_published >= 1:
-            last_payload = result.copy()
-            result["updated_at_ms"] = time.time() * 1000
-            atomic_json(runtime / "metrics.json", result)
-            last_published = time.monotonic()
-        time.sleep(0.1)
+    try:
+        while True:
+            if parent_pid and os.name == "nt":
+                import ctypes
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+                kernel.OpenProcess.restype = ctypes.c_void_p
+                kernel.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+                kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+                handle = kernel.OpenProcess(0x1000, False, parent_pid)
+                if not handle:
+                    return None
+                code = ctypes.c_ulong()
+                alive = kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259
+                kernel.CloseHandle(handle)
+                if not alive:
+                    return None
+            elif parent_pid:
+                try:
+                    os.kill(parent_pid, 0)
+                except ProcessLookupError:
+                    return None
+                except PermissionError:
+                    pass
+            selection = read_selection(runtime / "selection.json")
+            title = selection.get("title", "")
+            selected_id = selection.get("thread_id")
+            refresh_id = selection.get("refresh_id")
+            force = refresh_id != last_refresh_id
+            if force and quota:
+                quota.refresh()
+            if force and latency:
+                latency.refresh()
+            if force and radar:
+                radar.refresh()
+            last_refresh_id = refresh_id
+            catalog.refresh(force=force or once)
+            key = (title, selected_id)
+            if key != selection_key or force or time.monotonic() - matched_at >= 0.5 or once:
+                matches = catalog.title_matches(title) if title else []
+                selection_key = key
+                matched_at = time.monotonic()
+            selected = next((r for r in matches if r["id"] == selected_id), None)
+            if selection.get("binding_mode") == "activity":
+                # Internal permission reviews can be newer than the user's task.
+                # Match only the confirmed internal model; keep explicit binding
+                # and history intact, including ordinary user review conversations.
+                rows = [r for r in catalog.rows.values() if r.get("model") != "codex-auto-review"]
+                newest = max((r["updated_at_ms"] for r in rows), default=None)
+                matches = [r for r in rows if r["updated_at_ms"] == newest]
+                selected = matches[0] if len(matches) == 1 else None
+                title = selected["title"] if selected else ""
+            if selection.get("binding_mode") == "manual" and selected_id:
+                selected = catalog.rows.get(selected_id)
+            if selected is None and len(matches) == 1 and selection.get("binding_mode") != "manual":
+                selected = matches[0]
+            status = "ok" if selected else "ambiguous" if len(matches) > 1 else "unbound"
+            tail = tails.update(selected, force) if selected else None
+            metrics = tail.measurements.snapshot() if tail else None
+            if force:
+                refresh_result = {"request_id": refresh_id, "completed_at_ms": time.time() * 1000,
+                                  "state": "ok" if tail and tail.source_state == "ok" else
+                                  "unavailable" if tail else status,
+                                  "sample_at_ms": tail.measurements.last_usage_at if tail else None}
+            saved_range = read_selection(runtime / "range-result.json")
+            range_result = saved_range if selected and saved_range.get("thread_id") == selected["id"] else None
+            result = {"schema_version": 2, "collector_pid": os.getpid(),
+                      "repository_state": repository.state,
+                      "binding": status, "binding_mode": selection.get("binding_mode", "auto"),
+                      "thread_id": selected["id"] if selected else None,
+                      "title": title, "metrics": metrics, "source": tail.source() if tail else None,
+                      "refresh": refresh_result, "range": range_result,
+                      "account_quota": quota.snapshot() if quota else None,
+                      "network_latency": latency.snapshot() if latency else None,
+                      "reset_radar": radar.snapshot() if radar else None,
+                      "matches": [{k: r.get(k) for k in ("id", "title", "model", "updated_at")} for r in matches],
+                      "threads": [{"id": r["id"], "title": r["title"], "model": r["model"]} for r in list(catalog.rows.values())[:80]]}
+            if once:
+                result["updated_at_ms"] = time.time() * 1000
+                return result
+            if result != last_payload or time.monotonic() - last_published >= 1:
+                last_payload = result.copy()
+                result["updated_at_ms"] = time.time() * 1000
+                atomic_json(runtime / "metrics.json", result)
+                last_published = time.monotonic()
+            time.sleep(0.1)
+    finally:
+        if latency:
+            latency.close()
+        if radar:
+            radar.close()
 
 
 def main() -> None:
@@ -495,8 +693,12 @@ def main() -> None:
     parser.add_argument("--parent-pid", type=int)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dashboard", action="store_true", help="Start the local historical statistics panel")
+    parser.add_argument("--account-quota", action="store_true", help="Read account limits via the authenticated local Codex client")
+    parser.add_argument("--network-latency", action="store_true", help="Periodically probe the configured local proxy nodes")
+    parser.add_argument("--reset-radar", action="store_true", help="Read public quota-reset announcements and schedules")
     args = parser.parse_args()
-    result = monitor(args.codex_home, args.runtime, args.parent_pid, args.once, args.dashboard)
+    result = monitor(args.codex_home, args.runtime, args.parent_pid, args.once, args.dashboard, args.account_quota,
+                     args.network_latency, args.reset_radar)
     if result is not None:
         print(json.dumps(result, ensure_ascii=False, allow_nan=False))
 

@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = $PSScriptRoot
 if (-not $SkipTests) { & (Join-Path $taskRoot 'Test.ps1') -PythonExecutable $PythonExecutable }
 $taskVersion = (Get-Content -LiteralPath (Join-Path $taskRoot 'VERSION') -Raw).Trim()
-$taskName = "CodexTokenHud-$taskVersion-win-$Architecture"
+$taskName = "FOX-CODEX-HUD-$taskVersion-win-$Architecture"
 $taskDist = Join-Path $taskRoot 'dist'
 $taskStage = Join-Path $taskDist $taskName
 # Delete only this exact, validated package staging directory, never runtime or source data.
@@ -17,7 +17,7 @@ New-Item -ItemType Directory -Path $taskStage -Force | Out-Null
 & (Join-Path $taskRoot 'Build.ps1') -OutputDirectory $taskStage
 Remove-Item -LiteralPath (Join-Path $taskStage 'AssemblyInfo.g.cs')
 # Explicit allowlist: no account data, debug extracts, local settings, or conversation logs.
-$taskFiles = @('metrics.py', 'history.py', 'dashboard.py', 'stats.py', 'app_follow.py', 'StartDashboard.ps1', 'start-dashboard.sh', 'VERSION', 'README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
+$taskFiles = @('metrics.py', 'quota.py', 'latency.py', 'reset_radar.py', 'history.py', 'dashboard.py', 'stats.py', 'app_follow.py', 'StartDashboard.ps1', 'start-dashboard.sh', 'VERSION', 'README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
     'CHANGELOG.md', 'PRIVACY.md', 'SECURITY.md', 'CONTRIBUTING.md', 'settings.example.json',
     'Install.ps1', 'Uninstall.ps1', 'Start.ps1', 'Stop.ps1')
 foreach ($taskFile in $taskFiles) { Copy-Item -LiteralPath (Join-Path $taskRoot $taskFile) -Destination $taskStage }

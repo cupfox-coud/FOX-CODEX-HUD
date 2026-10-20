@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app_follow import (Lifecycle, WatcherLock, configure, desktop_exec, hud_command,
                         process_alive, process_kind, supported_processes, systemd_exec, watcher_command)
 from metrics import atomic_json, monitor
@@ -51,6 +52,22 @@ class FollowTests(unittest.TestCase):
         self.assertEqual(state.step([1], False, False, 2), 'start')
         self.assertIsNone(state.step([1, 2], True, True, 3))
         self.assertIsNone(state.step([2], True, True, 4))
+
+    def test_resident_starts_without_clients_and_stays_after_last_client(self):
+        state = Lifecycle()
+        self.assertIsNone(state.step([], False, False, 0, keep_open=True))
+        self.assertEqual(state.step([], False, False, 2, keep_open=True), 'start')
+        self.assertIsNone(state.step([1], True, True, 3, keep_open=True))
+        self.assertIsNone(state.step([], True, True, 4, keep_open=True))
+        self.assertIsNone(state.step([], True, True, 60, keep_open=True))
+
+    def test_resident_respects_explicit_exit(self):
+        state = Lifecycle()
+        state.step([], True, True, 0, keep_open=True)
+        self.assertIsNone(state.step([], False, True, 2, keep_open=True))
+        self.assertTrue(state.dismissed)
+        self.assertIsNone(state.step([], False, True, 60, keep_open=True))
+        self.assertIsNone(state.step([1], False, True, 90, keep_open=True))
 
     def test_short_version_probe_does_not_open_hud(self):
         state = Lifecycle()
@@ -204,6 +221,34 @@ class FollowTests(unittest.TestCase):
     def test_process_enumeration_returns_only_supported_targets(self):
         found = supported_processes()
         self.assertTrue(all(isinstance(pid, int) and pid > 0 and kind in ('desktop', 'backend') for pid, kind in found))
+
+    def test_resident_watcher_starts_real_dashboard_with_no_clients(self):
+        import time
+        from app_follow import watch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / 'watcher/config.json'
+            atomic_json(config, {'enabled': True, 'resident': True, 'command': hud_command('dashboard'),
+                                'runtime': str(root / 'runtime'), 'codex_home': str(root / 'empty')})
+            sleep, popen, processes = time.sleep, subprocess.Popen, []
+            def launch(*args, **kwargs):
+                process = popen(*args, **kwargs)
+                processes.append(process)
+                return process
+            try:
+                with patch('app_follow.supported_processes', return_value=[]), \
+                     patch('app_follow.Lifecycle', side_effect=lambda: Lifecycle(settle=0.01, grace=0.01)), \
+                     patch('app_follow.time.sleep', side_effect=lambda seconds: sleep(0.05)), \
+                     patch('app_follow.subprocess.Popen', side_effect=launch):
+                    watch(config, duration=0.6)
+                self.assertEqual(len(processes), 1)
+                self.assertIsNone(processes[0].poll())
+                self.assertFalse((root / 'runtime/app-close.request.json').exists())
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
 
     def test_stale_status_of_exited_hud_is_not_an_existing_instance(self):
         self.assertTrue(process_alive(os.getpid()))

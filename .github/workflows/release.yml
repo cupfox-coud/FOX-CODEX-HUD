@@ -36,7 +36,7 @@ jobs:
           $taskAssets = @(gh release view $env:HUD_TAG --json assets --jq '.assets[].name')
           if ($LASTEXITCODE -ne 0) { throw 'Verified package release is missing.' }
           foreach ($taskArchitecture in @('arm64', 'x86')) {
-            $taskArchiveName = "CodexTokenHud-$taskVersion-win-$taskArchitecture.zip"
+            $taskArchiveName = "FOX-CODEX-HUD-$taskVersion-win-$taskArchitecture.zip"
             if (($taskAssets -notcontains $taskArchiveName) -or ($taskAssets -notcontains "$taskArchiveName.sha256")) {
               .\Package.ps1 -Architecture $taskArchitecture -SkipTests -SkipSmokeTest
               if (-not (Test-Path -LiteralPath "dist/$taskArchiveName")) { throw 'Architecture package is missing.' }
@@ -44,5 +44,5 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw 'Architecture upload failed.' }
             }
           }
-          gh release edit $env:HUD_TAG --draft=false --prerelease --title "Codex Token HUD $env:HUD_TAG"
+          gh release edit $env:HUD_TAG --draft=false --prerelease --title "FOX CODEX HUD $env:HUD_TAG"
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

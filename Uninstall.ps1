@@ -6,7 +6,7 @@ if (Test-Path -LiteralPath $taskExe) {
     if ($taskSetup.ExitCode -ne 0) { throw '无法关闭本副本的随应用启动，未移除其他副本的设置。' }
 }
 & (Join-Path $PSScriptRoot 'Stop.ps1')
-$taskLinkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Codex Token 状态条.lnk'
+$taskLinkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'FOX CODEX HUD.lnk'
 if (Test-Path -LiteralPath $taskLinkPath) {
     $taskShell = New-Object -ComObject WScript.Shell
     $taskLink = $taskShell.CreateShortcut($taskLinkPath)
