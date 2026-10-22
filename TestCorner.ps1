@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$PythonExecutable)
+param([string]$PythonExecutable, [switch]$RenderOnly)
 $ErrorActionPreference = 'Stop'
 $taskRoot = $PSScriptRoot
 $taskOutput = Join-Path $taskRoot 'build\tests'
@@ -13,7 +13,8 @@ $taskArgs = @('/nologo', '/target:exe', '/platform:anycpu', '/main:CornerHudTest
     "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", "$taskRoot\ActivityDisplay.cs", "$taskRoot\CornerDisplay.cs", "$taskRoot\ResetRadarDisplay.cs", "$taskRoot\ResetNotifications.cs", "$taskRoot\tests\CornerHudTests.cs")
 & $taskCsc @taskArgs
 if ($LASTEXITCODE -ne 0) { throw 'Corner tests failed to compile.' }
-& $taskExe $taskRoot $PythonExecutable
+if ($RenderOnly) { & $taskExe $taskRoot $PythonExecutable '--render-only' }
+else { & $taskExe $taskRoot $PythonExecutable }
 if ($LASTEXITCODE -ne 0) { throw 'Corner HUD verification failed.' }
 $taskActivityExe = Join-Path $taskOutput 'ActivityDisplayTests.exe'
 $taskActivityArgs = $taskArgs | ForEach-Object {

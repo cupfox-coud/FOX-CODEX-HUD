@@ -140,6 +140,52 @@ class ResetRadarDisplayTests
         Check(!Read(data).Detail.Contains("周重置"), "official numeric overflow cannot create a bogus countdown");
         Json.Object(data, "reset_radar")["latest_events"] = new object[] {new Dictionary<string, object> {{"id", "old"}, {"at_ms", Now + 100000}}};
         Check(Read(data).Countdown == "暂无排期" && !Read(data).Alert, "historical events never become future schedules or account reset windows");
+        data = Fixture();
+        var completion = new Dictionary<string, object> {{"id", "completed-1"}, {"kind", "reset_completed"},
+            {"reset_type", "global"}, {"at_ms", Now - 480000}, {"time_basis", "announced"}};
+        var radar = Json.Object(data, "reset_radar");
+        radar["latest_events"] = new object[] { completion };
+        display = Read(data);
+        Check(display.State == "completed" && display.Countdown == "已重置" && display.Detail == "公告 · 8分钟前",
+            "recent API completion replaces no-schedule with a timestamped public completion");
+        Check(display.Title.Contains("公开记录") && display.Hint.Contains("实际重置时刻未提供") &&
+            !display.Alert && !display.UpcomingStartMs.HasValue, "announcement time is qualified and is not an account confirmation or new countdown");
+        completion["reset_type"] = "banked";
+        Check(Read(data).Countdown == "次数已发放", "banked credit distribution is not labeled a quota reset");
+        completion["reset_type"] = "global_and_banked";
+        Check(Read(data).Countdown == "已重置" && Read(data).Hint.Contains("同时包含"), "combined reset retains credit context");
+        completion["time_basis"] = "completed";
+        completion["at_ms"] = Now - 20000;
+        Check(Read(data).Detail == "完成 · 刚刚", "actual completion time receives its own label");
+        completion["at_ms"] = Now - 36000000;
+        Check(Read(data).State == "completed" && Read(data).Detail == "完成 · 10小时前", "10 hour completion boundary is retained");
+        completion["at_ms"] = Now - 36000001;
+        Check(Read(data).State == "none", "old completion expires instead of looking like a new reset forever");
+        foreach (object invalid in new object[] {Now + 30001, double.NaN, double.PositiveInfinity, true, -1})
+        {
+            completion["at_ms"] = invalid;
+            Check(Read(data).State == "none", "invalid or future completion is hidden: " + invalid);
+        }
+        completion["at_ms"] = Now - 480000;
+        completion["scope"] = new Dictionary<string, object> {{"plans", new object[] {"plus"}}};
+        Check(Read(data).State == "none", "other plan's completion does not appear as a Pro reset");
+        completion["scope"] = new Dictionary<string, object> {{"plans", new object[] {"pro"}}, {"windows", new object[] {"five_hour"}}};
+        Check(Read(data).State == "none", "five-hour-only completion does not appear as a weekly reset");
+        completion["scope"] = null;
+        foreach (string state in new[] {"unavailable", "stale", "limited"})
+        {
+            radar["state"] = state;
+            Check(Read(data).State == state, "failed or stale API retains honest status instead of a fresh completion");
+        }
+        radar["state"] = "ok";
+        Upcoming(data, "exact", Now + 600000, null);
+        Check(Read(data).State == "scheduled" && Read(data).Countdown == "10:00", "new valid schedule takes priority over a recent completion");
+        radar["upcoming"] = null;
+        radar["reason"] = "schedule_elapsed_unconfirmed";
+        Check(Read(data).State == "completed", "real completion remains visible when backend clears an elapsed plan");
+        radar["latest_events"] = new object[] {completion, new Dictionary<string, object> {
+            {"id", "newer"}, {"kind", "reset_completed"}, {"reset_type", "banked"}, {"at_ms", Now - 1000}}};
+        Check(Read(data).Countdown == "次数已发放", "newest relevant event wins regardless of source list ordering");
         Console.WriteLine("Reset radar display checks passed: " + checks);
     }
 }

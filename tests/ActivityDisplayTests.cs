@@ -30,8 +30,41 @@ class ActivityDisplayTests
     static void Check(bool condition, string name)
     { if (!condition) throw new Exception(name); checks++; Console.WriteLine("PASS " + name); }
 
+    static void CheckHistory()
+    {
+        var data = Fixture(true, 12, "generating");
+        data["thread_id"] = "history-session";
+        var rows = new object[] {
+            new Dictionary<string, object> {{"duration_ms", 10000}, {"completed_at_ms", Now - 30000}},
+            new Dictionary<string, object> {{"duration_ms", 20000}, {"completed_at_ms", Now - 1000}}};
+        var duration = new Dictionary<string, object> {{"mean_ms", 15000}, {"count", 2}, {"samples", rows}};
+        Json.Object(data, "metrics")["response_duration"] = duration;
+        var view = Read(data);
+        Check(view.ResponseMs.Count == 2 && view.ResponseMs[0] == 10000 && view.ResponseMs[1] == 20000 &&
+            view.LastResponseAt == Now - 1000 && view.SessionId == "history-session", "response chart keeps exact chronological completed samples");
+        duration["mean_ms"] = 17000;
+        Check(Read(data).ResponseMs.Count == 0, "mismatched mean cannot produce a misleading chart");
+        duration["mean_ms"] = 15000;
+        foreach (double invalid in new[] {double.NaN, double.PositiveInfinity, -1, 0, double.MaxValue})
+        {
+            ((Dictionary<string, object>)rows[1])["duration_ms"] = invalid;
+            Check(Read(data).ResponseMs.Count == 0, "invalid history duration is not plotted");
+        }
+        ((Dictionary<string, object>)rows[1])["duration_ms"] = 20000;
+        ((Dictionary<string, object>)rows[1])["completed_at_ms"] = Now + 31000;
+        Check(Read(data).ResponseMs.Count == 0, "future history cannot trigger response animation");
+        ((Dictionary<string, object>)rows[1])["completed_at_ms"] = Now - 40000;
+        Check(Read(data).ResponseMs.Count == 0, "out-of-order history is not connected");
+        duration.Remove("samples");
+        Check(Read(data).ResponseMs.Count == 0 && Read(data).AverageMs == 15000, "older collector retains mean without fabricated history");
+        duration["samples"] = rows;
+        data["updated_at_ms"] = Now - 10000;
+        Check(Read(data).ResponseMs.Count == 0, "stale collector clears history animation");
+    }
+
     static void Main()
     {
+        CheckHistory();
         var data = Fixture(true, 12, "generating");
         var display = Read(data);
         Check(display.Active && display.State == "generating" && display.Severity == 0 && display.ElapsedText == "00:12",

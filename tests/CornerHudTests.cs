@@ -80,6 +80,10 @@ class CornerHudTests
             Call(hud, "Tick", null, EventArgs.Empty);
             Check((Native.GetWindowLongPtr(hud.Handle, -20).ToInt64() & 0x20) != 0,
                 "expired temporary unlock automatically restores click-through");
+            // Rendering checks can run while the user works in another foreground app.
+            // The default suite still requires all interactive tray checks.
+            if (args.Length < 3 || args[2] != "--render-only")
+            {
             var menu = (ContextMenuStrip)Field(hud, "menu");
             menu.Show(new Point(hud.Left, hud.Bottom));
             Application.DoEvents();
@@ -134,6 +138,8 @@ class CornerHudTests
             Check(GetLayeredWindowAttributes(hud.Handle, out key, out alpha, out flags) && alpha == 255 &&
                 (Native.GetWindowLongPtr(hud.Handle, -20).ToInt64() & 0x20) != 0, "fully opaque tray option preserves native click-through");
             opacityMenu.DropDownItems.Cast<ToolStripItem>().Single(i => i.Text.StartsWith("78%")).PerformClick();
+            }
+            else Console.WriteLine("SKIP interactive tray checks (--render-only)");
             config.CornerMonitor = "disconnected-monitor";
             Call(hud, "PositionHud");
             Check(hud.Bounds == anchored, "missing saved monitor falls back to the available secondary monitor");
@@ -150,12 +156,13 @@ class CornerHudTests
                 {"network_latency", new Dictionary<string, object> {{"state", "ok"}, {"updated_at_ms", now - 3000},
                     {"nodes", new object[] { Node("ai", 223, now), Node("general", 66, now) }}}},
                 {"metrics", new Dictionary<string, object> {{"model", "gpt-6.1-sol"}, {"stage", "tools"},
-                    {"response_duration", new Dictionary<string, object> {{"mean_ms", 142000}, {"count", 12}, {"limit", 20}}},
+                    {"response_duration", ResponseFixture(now)},
                     {"turn_active", true}, {"last_event_at_ms", now - 12000},
                     {"last", new Dictionary<string, object> {{"model", "gpt-6.1-sol"}, {"measured_at_ms", now}, {"rate", 87.4}, {"cache_percent", 98.8}}}}} });
             Call(hud, "UpdateView", new object[] { null });
             Call(hud, "UpdateMetrics");
             StressDrawing(hud);
+            CheckResponsePreviews(hud, root);
             using (var bitmap = new Bitmap(hud.Width, hud.Height))
             using (var graphics = Graphics.FromImage(bitmap))
             {
@@ -222,6 +229,14 @@ class CornerHudTests
             SavePreview(hud, Path.Combine(root, "build", "corner-reset-scheduled.png"));
             Check(((ResetRadarDisplay)Field(hud, "resetRadar")).Alert, "near scheduled reset is prominent in the small radar card");
             radar["upcoming"] = null;
+            radar["latest_events"] = new object[] {new Dictionary<string, object> {
+                {"id", "demo-completed"}, {"kind", "reset_completed"}, {"reset_type", "global"},
+                {"at_ms", now - 480000}, {"time_basis", "announced"}}};
+            Call(hud, "UpdateMetrics");
+            SavePreview(hud, Path.Combine(root, "build", "corner-reset-completed.png"));
+            Check(((ResetRadarDisplay)Field(hud, "resetRadar")).Countdown == "已重置",
+                "recent public completion is presented in the actual corner card");
+            radar["latest_events"] = new object[0];
             quota["windows"] = new object[] {new Dictionary<string, object> {{"window_minutes", 10080}, {"remaining_percent", 59}, {"resets_at", now / 1000 - 1}}};
             Call(hud, "UpdateMetrics");
             Check(((List<Dictionary<string, object>>)Field(hud, "quotaWindows")).Count == 0 &&
@@ -300,6 +315,29 @@ class CornerHudTests
 
     static void CheckMotion(Hud hud, string root)
     {
+        var response = Field(hud, "responseMotion");
+        var responseUpdate = response.GetType().GetMethod("Update", Private);
+        var responseBlend = response.GetType().GetMethod("Blend", Private);
+        var view = new ActivityDisplay {SessionId = "test-one", LastResponseAt = 1};
+        view.ResponseMs.AddRange(new double[] {10000, 20000});
+        responseUpdate.Invoke(response, new object[] {view, 1000.0, true});
+        Check((double)Field(response, "ChangedAt") < 0, "first history load does not announce a new response");
+        view.LastResponseAt = 2; view.ResponseMs.Add(15000);
+        responseUpdate.Invoke(response, new object[] {view, 2000.0, true});
+        Check((double)Field(response, "ChangedAt") == 2000 &&
+            (double)responseBlend.Invoke(response, new object[] {2000.0, true}) == 0 &&
+            (double)responseBlend.Invoke(response, new object[] {2900.0, true}) == 1,
+            "new response morph starts once and settles in 900 milliseconds");
+        responseUpdate.Invoke(response, new object[] {view, 2500.0, true});
+        Check((double)Field(response, "ChangedAt") == 2000, "unchanged telemetry does not restart the curve reveal");
+        Check((double)responseBlend.Invoke(response, new object[] {2100.0, false}) == 1, "reduced motion displays the exact curve immediately");
+        view.SessionId = "test-two";
+        responseUpdate.Invoke(response, new object[] {view, 3000.0, true});
+        Check((double)Field(response, "ChangedAt") < 0 &&
+            ((double[])Field(response, "From")).SequenceEqual(view.ResponseMs), "switching conversations resets curve without blending unrelated data");
+        view.ResponseMs.Clear();
+        responseUpdate.Invoke(response, new object[] {view, 4000.0, true});
+        Check(((double[])Field(response, "Target")).Length == 0, "missing history clears all chart points");
         var motion = Field(hud, "aiMotion");
         var update = motion.GetType().GetMethod("Update", Private);
         var color = motion.GetType().GetMethod("ReadColor", Private);
@@ -337,6 +375,45 @@ class CornerHudTests
             "real recovery is reflected in the compact notification line");
     }
 
+    static void CheckResponsePreviews(Hud hud, string root)
+    {
+        var original = (ActivityDisplay)Field(hud, "activity");
+        var sample = new ActivityDisplay {SessionId = "preview", Active = true, State = "generating", Title = "正在生成",
+            ElapsedText = "00:12", EventAgeMs = 12000, AverageText = "15.0s", AverageMs = 15000, CompletedCount = 20, LastResponseAt = 1};
+        sample.ResponseMs.AddRange(original.ResponseMs);
+        Set(hud, "activity", sample);
+        SavePreview(hud, Path.Combine(root, "build", "corner-response-trend.png"));
+        var motion = Field(hud, "responseMotion");
+        var update = motion.GetType().GetMethod("Update", Private);
+        double time = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        sample.ResponseMs.RemoveAt(0); sample.ResponseMs.Add(45000); sample.LastResponseAt = 2;
+        sample.AverageMs = sample.ResponseMs.Average(); sample.AverageText = (sample.AverageMs.Value / 1000).ToString("0.0") + "s";
+        update.Invoke(motion, new object[] {sample, time, true});
+        foreach (int offset in new[] {0, 450, 900, 1500})
+        {
+            motion.GetType().GetField("ChangedAt", Private).SetValue(motion,
+                System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency - offset);
+            SavePreview(hud, Path.Combine(root, "build", "corner-response-transition-" + offset + ".png"));
+        }
+        sample.ResponseMs.Clear(); sample.ResponseMs.Add(12500); sample.AverageMs = 12500;
+        sample.AverageText = "12.5s"; sample.CompletedCount = 1; sample.LastResponseAt = 3;
+        SavePreview(hud, Path.Combine(root, "build", "corner-response-single.png"));
+        sample.ResponseMs.Clear(); sample.AverageMs = null; sample.AverageText = "--:--"; sample.CompletedCount = 0;
+        SavePreview(hud, Path.Combine(root, "build", "corner-response-empty.png"));
+        Check(((double[])Field(motion, "Target")).Length == 0, "empty response chart clears previous session visuals");
+        sample.ResponseMs.Add(7200000); sample.AverageMs = 7200000; sample.AverageText = "02:00:00";
+        sample.CompletedCount = 1; sample.LastResponseAt = 4;
+        SavePreview(hud, Path.Combine(root, "build", "corner-response-long.png"));
+        Set(hud, "activity", original);
+    }
+
+    static Dictionary<string, object> ResponseFixture(double now)
+    {
+        var seconds = new double[] {8, 12, 9, 19, 14, 11, 27, 16, 10, 7, 15, 34, 21, 12, 9, 18, 25, 13, 8, 11};
+        return new Dictionary<string, object> {{"mean_ms", seconds.Average() * 1000}, {"count", 20}, {"limit", 20},
+            {"samples", seconds.Select((value, i) => new Dictionary<string, object> {
+                {"duration_ms", value * 1000}, {"completed_at_ms", now - (20 - i) * 40000}}).ToArray()}};
+    }
     static Dictionary<string, object> Node(string id, int delay, double now)
     {
         return new Dictionary<string, object> {{"id", id}, {"state", "ok"}, {"delay_ms", delay}, {"measured_at_ms", now},

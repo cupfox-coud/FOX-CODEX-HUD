@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace CodexTokenHud
 {
@@ -65,6 +66,49 @@ namespace CodexTokenHud
             return earliest.HasValue ? "周重置 " + Duration(earliest.Value - nowMs) : null;
         }
 
+        private static bool RelevantScope(Dictionary<string, object> item)
+        {
+            var scope = Json.Object(item, "scope");
+            foreach (string key in new[] { "plans", "windows" })
+            {
+                var values = Json.Get(scope, key) as System.Collections.IEnumerable;
+                if (values == null || values is string) continue;
+                var names = values.Cast<object>().OfType<string>().Select(s => s.ToLowerInvariant()).ToArray();
+                var allowed = key == "plans" ? new[] { "pro", "pro_5x", "pro_20x", "pro5x", "pro20x" } :
+                    new[] { "weekly", "week", "seven_day" };
+                if (names.Length > 0 && !names.Any(s => allowed.Contains(s) ||
+                    new[] { "unknown", "all", "all_plans", "all_windows" }.Contains(s))) return false;
+            }
+            return true;
+        }
+
+        private static bool ShowRecentCompletion(ResetRadarDisplay result, Dictionary<string, object> radar, double nowMs)
+        {
+            // Use the publisher's event time, never the fetch time or an elapsed plan.
+            var item = Json.List(radar, "latest_events").Where(e =>
+                Json.Text(e, "kind") == "reset_completed" && Json.Text(e, "id").Length > 0 &&
+                new[] { "global", "banked", "global_and_banked" }.Contains(Json.Text(e, "reset_type")) &&
+                Fresh(Number(e, "at_ms"), nowMs, 10 * 3600000) && RelevantScope(e))
+                .OrderByDescending(e => Number(e, "at_ms")).FirstOrDefault();
+            if (item == null) return false;
+            double age = Math.Max(0, nowMs - Number(item, "at_ms").Value);
+            string ago = age < 60000 ? "刚刚" : age < 3600000 ?
+                ((int)(age / 60000)).ToString(CultureInfo.InvariantCulture) + "分钟前" :
+                ((int)(age / 3600000)).ToString(CultureInfo.InvariantCulture) + "小时前";
+            string basis = Json.Text(item, "time_basis") == "announced" ? "公告" : "完成";
+            result.State = "completed";
+            result.Title = "重置雷达 · 公开记录";
+            result.Countdown = Json.Text(item, "reset_type") == "banked" ? "次数已发放" : "已重置";
+            result.Detail = basis + " · " + ago;
+            result.Alert = false;
+            result.UpcomingId = "";
+            result.UpcomingStartMs = result.UpcomingEndMs = null;
+            result.Hint += " 网站已记录本次完成事件，最近 10 小时保留此提示；个人到账请查看左侧账户额度。" +
+                (basis == "公告" ? " 距今时间按公告发布时间计算，实际重置时刻未提供。" : "") +
+                (Json.Text(item, "reset_type") == "global_and_banked" ? " 同时包含储备重置次数发放。" : "");
+            return true;
+        }
+
         internal static ResetRadarDisplay Read(Dictionary<string, object> data, double nowMs)
         {
             var result = new ResetRadarDisplay();
@@ -103,6 +147,7 @@ namespace CodexTokenHud
             var upcoming = Json.Object(radar, "upcoming");
             if (upcoming == null)
             {
+                if (ShowRecentCompletion(result, radar, nowMs)) return result;
                 string scheduleReason = Json.Text(radar, "reason");
                 if (scheduleReason == "schedule_elapsed_unconfirmed")
                 {
@@ -147,6 +192,7 @@ namespace CodexTokenHud
                 precision == "date" && LocalDate(nowMs).Date > LocalDate(start.Value).Date;
             if (expired)
             {
+                if (ShowRecentCompletion(result, radar, nowMs)) return result;
                 result.State = "expired";
                 result.Countdown = "等待确认";
                 result.Detail = "计划时间已过 · 未确认";

@@ -31,6 +31,7 @@ namespace CodexTokenHud
         private double nextMotionPreference;
         private readonly NodeMotion aiMotion = new NodeMotion();
         private readonly NodeMotion generalMotion = new NodeMotion();
+        private readonly ResponseMotion responseMotion = new ResponseMotion();
         private static double MotionMs { get { return System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency; } }
 
         // One lightweight clock; animation never reads files or triggers probes.
@@ -75,6 +76,42 @@ namespace CodexTokenHud
         {
             return Color.FromArgb((int)(a.R + (b.R - a.R) * t),
                 (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
+        }
+
+        private sealed class ResponseMotion
+        {
+            internal string Session = "";
+            internal double Stamp, ChangedAt = -100000;
+            internal double[] From = new double[0], Target = new double[0];
+            internal double Blend(double now, bool animate)
+            {
+                double t = animate ? Math.Max(0, Math.Min(1, (now - ChangedAt) / 900)) : 1;
+                return 1 - Math.Pow(1 - t, 3);
+            }
+            internal void Update(ActivityDisplay value, double now, bool animate)
+            {
+                if (Session == value.SessionId && Stamp == value.LastResponseAt && Target.SequenceEqual(value.ResponseMs)) return;
+                bool continuous = Session == value.SessionId && Target.Length > 0 && value.ResponseMs.Count > 0;
+                double blend = Blend(now, animate);
+                var next = value.ResponseMs.ToArray();
+                var prior = new double[next.Length];
+                for (int i = 0; i < next.Length; i++)
+                {
+                    int old = Math.Max(0, Math.Min(Target.Length - 1, i - (next.Length - Target.Length)));
+                    prior[i] = continuous ? From[old] + (Target[old] - From[old]) * blend : next[i];
+                }
+                Session = value.SessionId; Stamp = value.LastResponseAt;
+                From = prior; Target = next;
+                // Switching sessions and first load must not look like new output.
+                ChangedAt = continuous && animate ? now : now - 100000;
+            }
+        }
+
+        private static Color ResponseColor(double ms)
+        {
+            double t = Math.Max(0, Math.Min(3, ms < 30000 ? ms / 30000 : ms < 60000 ?
+                1 + (ms - 30000) / 30000 : 2 + (ms - 60000) / 60000));
+            return t < 1 ? Mix(Mint, Amber, t) : t < 2 ? Mix(Amber, Orange, t - 1) : Mix(Orange, Rose, t - 2);
         }
 
         // Layered vector strokes provide a soft halo without bitmap blur or cached textures.
@@ -148,9 +185,9 @@ namespace CodexTokenHud
             bool heartbeatOk = now - (Json.Number(data, "updated_at_ms") ?? 0) <= 6000;
             string networkTime = Json.Text(network, "state") == "loading" ? "正在主动探测" :
                 !heartbeatOk || networkAge > 75000 ? "等待重新探测" :
-                "30 秒主动探测 · " + Math.Max(0, (int)(networkAge / 1000)).ToString() + " 秒前";
+                (Json.Number(network, "interval_seconds") ?? 10).ToString("0") + " 秒主动探测 · " + Math.Max(0, (int)(networkAge / 1000)).ToString() + " 秒前";
             PaintNode(graphics, nodes.FirstOrDefault(n => Json.Text(n, "id") == "ai"), "AI节点", 16, now, heartbeatOk);
-            PaintNode(graphics, nodes.FirstOrDefault(n => Json.Text(n, "id") == "general"), "苏菲家宽", 190, now, heartbeatOk);
+            PaintNode(graphics, nodes.FirstOrDefault(n => Json.Text(n, "id") == "general"), "上网节点", 190, now, heartbeatOk);
             var notice = aiMotion.Level >= 2 && aiMotion.Level >= generalMotion.Level ? aiMotion :
                 generalMotion.Level >= 2 ? generalMotion : aiMotion.ChangedAt > generalMotion.ChangedAt ? aiMotion : generalMotion;
             bool showNotice = notice.Notice.Length > 0 && motion - notice.ChangedAt < 8000;
@@ -182,10 +219,10 @@ namespace CodexTokenHud
                 CornerText(g, window == null ? "账户额度剩余" : QuotaLabel(window), cornerSmallFont, Muted, new RectangleF(17, 42, 180, 18), false);
                 CornerText(g, window == null ? "--" : remaining.ToString("0.#") + "%", cornerQuotaFont, color, new RectangleF(13, 57, 147, 48), false);
                 var radar = resetRadar ?? ResetRadarDisplay.Read(data, EpochMs());
-                Color radarColor = radar.Alert ? Amber : Blue;
+                Color radarColor = radar.State == "completed" ? Mint : radar.Alert ? Amber : Blue;
                 Panel(g, new RectangleF(190, 42, 162, 65), Color.FromArgb(17, radarColor), Color.FromArgb(45, radarColor), 9);
                 CornerText(g, radar.Title, cornerSmallFont, Muted, new RectangleF(202, 47, 132, 17), false);
-                using (var dot = new SolidBrush(radar.State == "none" || radar.Alert ? radarColor : Muted)) g.FillEllipse(dot, 336, 53, 4, 4);
+                using (var dot = new SolidBrush(radar.State == "none" || radar.State == "completed" || radar.Alert ? radarColor : Muted)) g.FillEllipse(dot, 336, 53, 4, 4);
                 CornerText(g, radar.Countdown, cornerValueFont, radarColor, new RectangleF(201, 64, 140, 24), false);
                 CornerText(g, radar.Detail, cornerSmallFont, Muted, new RectangleF(202, 88, 140, 16), false);
                 PaintQuotaBar(g, 17, 112, 334, remaining, color);
@@ -273,45 +310,132 @@ namespace CodexTokenHud
 
         private void PaintActivity(Graphics g, Color color, double phase)
         {
+            double time = MotionMs;
+            var bounds = new RectangleF(14, 269, 340, 94);
             int tint = !activity.Active ? 12 : (int)(16 + activity.WaitLevel * 5 + phase * activity.WaitLevel * 7);
-            Panel(g, new RectangleF(14, 272, 340, 88), Color.FromArgb(tint, color), Color.FromArgb(55 + (int)(activity.WaitLevel * 25), color), 11);
+            Panel(g, bounds, Color.FromArgb(tint, color), Color.FromArgb(55 + (int)(activity.WaitLevel * 25), color), 11);
             if (activity.Active)
             {
-                GlowPanel(g, new RectangleF(14, 272, 340, 88), color, 0.3 + activity.WaitLevel * 0.3, phase);
-                // Thin moving light carries the activity signal, away from readable text.
-                var rail = new RectangleF(28, 330, 312, 2);
-                using (var track = new SolidBrush(Color.FromArgb(28, color))) g.FillRectangle(track, rail);
-                float pos = motionAllowed ? (float)((MotionMs % 4200) / 4200) : 0.5f;
-                float width = 34 + (float)activity.WaitLevel * 12;
-                var light = new RectangleF(rail.X + pos * (rail.Width - width), rail.Y, width, 2);
-                using (var brush = new LinearGradientBrush(light, Color.FromArgb(0, color), Color.FromArgb(170, color), 0f))
-                    g.FillRectangle(brush, light);
+                GlowPanel(g, bounds, color, 0.35 + activity.WaitLevel * 0.32, phase);
+                // Long waits expand a soft contour; no flashing or fabricated data peaks.
+                if (motionAllowed && activity.Severity >= 2)
+                {
+                    double cycle = (time % 2800) / 2800;
+                    float inset = (float)(5 * (1 - cycle));
+                    using (var path = RoundedCard(new RectangleF(14 + inset, 269 + inset, 340 - inset * 2, 94 - inset * 2), 10))
+                    using (var pen = new Pen(Color.FromArgb((int)(42 * (1 - cycle)), color))) g.DrawPath(pen, path);
+                }
             }
             using (var edge = new Pen(Color.FromArgb((int)(130 + phase * 100), color), activity.Severity >= 2 ? 3 : 2))
-            { edge.StartCap = LineCap.Round; edge.EndCap = LineCap.Round; g.DrawLine(edge, 15, 290, 15, 324); }
-            CornerText(g, activity.Title, cornerTitleFont, color, new RectangleF(28, 281, 169, 21), false);
+            { edge.StartCap = LineCap.Round; edge.EndCap = LineCap.Round; g.DrawLine(edge, 15, 285, 15, 337); }
+            CornerText(g, activity.Title, cornerTitleFont, color, new RectangleF(26, 275, 140, 20), false);
             string ageLabel = activity.State == "idle" ? "最近活动" : "距最新活动";
-            CornerText(g, ageLabel, cornerSmallFont, Muted, new RectangleF(227, 280, 112, 16), true);
-            Font timer = activity.ElapsedText.Length > 5 ? cornerValueFont : cornerTimerFont;
-            CornerText(g, activity.ElapsedText, timer, activity.Active ? color : Ink, new RectangleF(209, 294, 131, 33), true);
-            var clock = new RectangleF(222, 301, 18, 18);
+            CornerText(g, ageLabel, cornerSmallFont, Muted, new RectangleF(188, 276, 75, 18), true);
+            CornerText(g, activity.ElapsedText, activity.ElapsedText.Length > 5 ? cornerTitleFont : cornerValueFont,
+                activity.Active ? color : Ink, new RectangleF(267, 271, 75, 27), true);
+            var clock = new RectangleF(170, 279, 12, 12);
             using (var track = new Pen(Color.FromArgb(45, color), 2)) g.DrawEllipse(track, clock);
             double fullAt = activity.State == "tools" ? 600000 : 120000;
-            float sweep = activity.Active ? (float)(360 * Math.Min(1, (activity.EventAgeMs ?? 0) / fullAt)) : 0;
-            PaintWaitRing(g, clock, sweep, color);
-            using (var hands = new Pen(Color.FromArgb(160, color), 1))
-            { g.DrawLine(hands, 231, 305, 231, 310); g.DrawLine(hands, 231, 310, 234, 312); }
-            CornerText(g, "平均响应", cornerSmallFont, Muted, new RectangleF(28, 306, 66, 18), false);
-            CornerText(g, activity.AverageText, cornerValueFont, activity.CompletedCount > 0 ? Blue : Muted,
-                new RectangleF(98, 301, 88, 27), false);
-            CornerText(g, activity.CompletedCount > 0 ? activity.CompletedCount + "次" : "暂无",
-                cornerSmallFont, Muted, new RectangleF(187, 307, 30, 17), false);
+            PaintWaitRing(g, clock, activity.Active ? (float)(360 * Math.Min(1, (activity.EventAgeMs ?? 0) / fullAt)) : 0, color);
+            if (activity.Active && motionAllowed)
+            {
+                double angle = time / (activity.Severity >= 2 ? 650 : 1200);
+                using (var dot = new SolidBrush(Color.FromArgb((int)(120 + phase * 120), color)))
+                    g.FillEllipse(dot, 175 + (float)Math.Cos(angle) * 6, 284 + (float)Math.Sin(angle) * 6, 2, 2);
+            }
+            CornerText(g, "平均响应", cornerSmallFont, Muted, new RectangleF(26, 297, 85, 18), false);
+            string average = activity.AverageText;
+            CornerText(g, average, average.Length > 6 ? cornerValueFont : cornerNumberFont,
+                activity.AverageMs.HasValue ? ResponseColor(activity.AverageMs.Value) : Muted,
+                new RectangleF(24, 311, 94, 32), false);
+            PaintResponseHistory(g, time);
             string detail = activity.Severity > 0 || activity.State == "unknown" ? activity.Detail :
-                activity.CompletedCount > 1 ? "最近 " + activity.CompletedCount + " 次响应 · 日志估算" :
+                activity.CompletedCount > 1 ? "最近 " + activity.CompletedCount + " 次 · 虚线为均值 · 日志估算" :
                 activity.CompletedCount == 1 ? "仅 1 次响应 · 持续积累中" : "等待有完整计时的模型响应";
-            CornerText(g, detail, cornerSmallFont, activity.Severity >= 2 ? color : Muted, new RectangleF(28, 339, 312, 16), false);
+            CornerText(g, detail, cornerSmallFont, activity.Severity >= 2 ? color : Muted, new RectangleF(26, 343, 316, 16), false);
         }
 
+        private void PaintResponseHistory(Graphics g, double time)
+        {
+            responseMotion.Update(activity, time, motionAllowed);
+            var values = responseMotion.Target;
+            var plot = new RectangleF(126, 316, 210, 22);
+            CornerText(g, "响应趋势", cornerSmallFont, Muted, new RectangleF(124, 297, 80, 17), false);
+            if (values.Length == 0)
+            {
+                using (var pen = new Pen(Color.FromArgb(45, Muted))) { pen.DashStyle = DashStyle.Dot; g.DrawLine(pen, plot.Left, plot.Bottom, plot.Right, plot.Bottom); }
+                CornerText(g, "等待完整记录", cornerSmallFont, Muted, new RectangleF(211, 297, 128, 17), true);
+                return;
+            }
+            double maximum = values.Max();
+            double ceiling = Math.Max(1000, maximum * 1.18);
+            double blend = responseMotion.Blend(time, motionAllowed);
+            // Scale morphs with the vertices so an outlier never causes a one-frame jump.
+            double oldCeiling = Math.Max(1000, responseMotion.From.Max() * 1.18);
+            ceiling = oldCeiling + (ceiling - oldCeiling) * blend;
+            string peak = maximum < 3600000 ? (maximum / 1000).ToString("0.#") + "s" : ActivityDisplay.Elapsed(maximum);
+            CornerText(g, "最高 " + peak, cornerSmallFont, Muted, new RectangleF(211, 297, 128, 17), true);
+            var chartState = g.Save();
+            try
+            {
+            g.SetClip(new RectangleF(120, 314, 226, 28), CombineMode.Intersect);
+            var points = new PointF[values.Length];
+            for (int i = 0; i < points.Length; i++)
+            {
+                double ms = responseMotion.From[i] + (values[i] - responseMotion.From[i]) * blend;
+                points[i] = new PointF(plot.Left + (20 - points.Length + i) * plot.Width / 19,
+                    plot.Bottom - (float)(ms / ceiling * plot.Height));
+            }
+            Color latest = ResponseColor(values[values.Length - 1]);
+            using (var baseline = new Pen(Color.FromArgb(30, Blue))) g.DrawLine(baseline, plot.Left, plot.Bottom, plot.Right, plot.Bottom);
+            // Reference uses the true mean; the history is chronological, oldest left.
+            float meanY = plot.Bottom - (float)Math.Min(plot.Height, (activity.AverageMs ?? 0) / ceiling * plot.Height);
+            using (var mean = new Pen(Color.FromArgb(110, Blue)))
+            { mean.DashStyle = DashStyle.Dot; g.DrawLine(mean, plot.Left, meanY, plot.Right, meanY); }
+            if (points.Length > 1)
+            {
+                using (var fill = new GraphicsPath())
+                {
+                    fill.AddLines(points); fill.AddLine(points[points.Length - 1], new PointF(plot.Right, plot.Bottom));
+                    fill.AddLine(new PointF(plot.Right, plot.Bottom), new PointF(points[0].X, plot.Bottom)); fill.CloseFigure();
+                    using (var brush = new LinearGradientBrush(plot, Color.FromArgb(42, Blue), Color.FromArgb(0, Blue), 90f)) g.FillPath(brush, fill);
+                }
+                using (var glow = new Pen(Color.FromArgb(20, Blue), 5)) g.DrawLines(glow, points);
+                for (int i = 1; i < points.Length; i++)
+                    using (var pen = new Pen(ResponseColor(values[i]), 1.6f)) g.DrawLine(pen, points[i - 1], points[i]);
+                // Moving illumination follows the real polyline; it never moves data points.
+                if (motionAllowed && activity.Active)
+                {
+                    double head = (time % 4800) / 4800 * (points.Length - 1);
+                    for (int trail = 0; trail < 6; trail++)
+                    {
+                        double position = head - trail * 0.14;
+                        if (position < 0) continue;
+                        int segment = Math.Min(points.Length - 2, (int)position);
+                        float fraction = (float)(position - segment);
+                        float px = points[segment].X + (points[segment + 1].X - points[segment].X) * fraction;
+                        float py = points[segment].Y + (points[segment + 1].Y - points[segment].Y) * fraction;
+                        using (var glint = new SolidBrush(Color.FromArgb(160 - trail * 23, Ink)))
+                            g.FillEllipse(glint, px - 1.2f, py - 1.2f, 2.4f, 2.4f);
+                    }
+                }
+            }
+            foreach (var point in points)
+                using (var dot = new SolidBrush(Color.FromArgb(190, Ink))) g.FillEllipse(dot, point.X - 1, point.Y - 1, 2, 2);
+            PointF end = points[points.Length - 1];
+            double reveal = motionAllowed ? Math.Max(0, 1 - (time - responseMotion.ChangedAt) / 1800) : 0;
+            if (reveal > 0)
+            {
+                float r = (float)(3 + (1 - reveal) * 8);
+                using (var ring = new Pen(Color.FromArgb((int)(reveal * 170), latest))) g.DrawEllipse(ring, end.X - r, end.Y - r, r * 2, r * 2);
+            }
+            // A restrained endpoint breathes while working; historical points stay put.
+            double pulse = motionAllowed && activity.Active ? (1 + Math.Sin(time / 1000)) / 2 : 0;
+            using (var halo = new SolidBrush(Color.FromArgb((int)(22 + pulse * 25), latest))) g.FillEllipse(halo, end.X - 5, end.Y - 5, 10, 10);
+            using (var dot = new SolidBrush(latest)) g.FillEllipse(dot, end.X - 2, end.Y - 2, 4, 4);
+            }
+            finally { g.Restore(chartState); }
+        }
         private static void PaintWaitRing(Graphics g, RectangleF bounds, float sweep, Color color)
         {
             if (float.IsNaN(sweep) || float.IsInfinity(sweep) || sweep <= 0) return;

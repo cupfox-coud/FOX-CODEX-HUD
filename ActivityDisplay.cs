@@ -19,6 +19,9 @@ namespace CodexTokenHud
         internal string AverageSampleText = "完成后更新";
         internal int CompletedCount;
         internal double? AverageMs;
+        internal readonly List<double> ResponseMs = new List<double>();
+        internal double LastResponseAt;
+        internal string SessionId = "";
 
         private static bool ValidTime(double? value, double nowMs)
         {
@@ -76,6 +79,24 @@ namespace CodexTokenHud
                 result.CompletedCount = (int)count.Value;
                 result.AverageText = mean.Value < 3600000 ? (mean.Value / 1000).ToString("0.0", CultureInfo.InvariantCulture) + "s" : Elapsed(mean.Value);
                 result.AverageSampleText = count.Value == 1 ? "仅 1 次 · 待积累" : "本会话 · " + count.Value.ToString("0") + " 次";
+                result.SessionId = Json.Text(data, "thread_id");
+                // Draw exactly the same completed responses as the numeric mean.
+                // Older collectors may have a mean but no history: never invent a line.
+                var samples = new List<Dictionary<string, object>>(Json.List(processing, "samples"));
+                bool valid = samples.Count == result.CompletedCount;
+                double sum = 0, previous = 0;
+                foreach (var sample in samples)
+                {
+                    double? ms = Json.Number(sample, "duration_ms");
+                    double? at = Json.Number(sample, "completed_at_ms");
+                    if (!ms.HasValue || double.IsNaN(ms.Value) || double.IsInfinity(ms.Value) || ms.Value <= 0 ||
+                        !ValidTime(at, nowMs) || at.Value < previous || ms.Value > at.Value) { valid = false; break; }
+                    sum += ms.Value; previous = at.Value;
+                    result.ResponseMs.Add(ms.Value);
+                }
+                if (!valid || Math.Abs(sum / result.CompletedCount - mean.Value) > Math.Max(1, mean.Value * 0.000001))
+                    result.ResponseMs.Clear();
+                else result.LastResponseAt = previous;
             }
             double? eventAt = Json.Number(metrics, "last_event_at_ms");
             if (ValidTime(eventAt, nowMs))

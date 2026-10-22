@@ -33,7 +33,13 @@ class MeasurementsTest(unittest.TestCase):
             m.feed(event(elapsed, 'token_usage_record', {'response_id': str(i), 'usage': usage()}))
         m.feed(event(3180, 'event_msg', {'type': 'task_complete', 'turn_id': 'long-task'}))
         self.assertEqual(m.snapshot()['response_duration'],
-                         {'mean_ms': 10500, 'count': 20, 'limit': 20, 'last_ms': 20000})
+                         {'mean_ms': 10500, 'count': 20, 'limit': 20, 'last_ms': 20000,
+                          'samples': [{'duration_ms': i * 1000,
+                                       'completed_at_ms': 1700000000000 + i * (i + 1) / 2 * 1000}
+                                      for i in range(1, 21)]})
+        copy = m.snapshot()['response_duration']['samples']
+        copy[0]['duration_ms'] = -1
+        self.assertEqual(m.snapshot()['response_duration']['samples'][0]['duration_ms'], 1000)
         self.assertNotIn('processing_duration', m.snapshot())
 
     def test_response_mean_excludes_tools_idle_and_unfinished_response(self):
@@ -61,6 +67,8 @@ class MeasurementsTest(unittest.TestCase):
             m.feed(event(i * 100 + i + 2, 'token_usage_record', {'response_id': str(i), 'usage': usage()}))
         self.assertEqual(m.snapshot()['response_duration']['count'], 20)
         self.assertEqual(m.snapshot()['response_duration']['mean_ms'], 15500)
+        samples = m.snapshot()['response_duration']['samples']
+        self.assertEqual([r['duration_ms'] for r in samples], list(range(6000, 26000, 1000)))
 
     def test_response_average_recovers_prefix_and_cross_boundary_timing(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -670,7 +678,7 @@ class NetworkCollectorIntegrationTest(unittest.TestCase):
             with patch("metrics.time.sleep", side_effect=[None, StopMonitor]):
                 with self.assertRaises(StopMonitor):
                     monitor(root, runtime, network_latency=True, reset_radar=True)
-            factory.assert_called_once_with(interval=30)
+            factory.assert_called_once_with()
             self.assertEqual(poller.snapshot.call_count, 2)
             poller.refresh.assert_called_once_with()
             poller.close.assert_called_once_with()

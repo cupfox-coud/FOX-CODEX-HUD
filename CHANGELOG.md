@@ -1,5 +1,27 @@
 # Changelog
 
+## FOX CODEX HUD 1.3.0-beta.8.corner.15 — 2026-10-21
+
+The compact activity card now plots the same latest 20 completed responses used by its
+mean, with a mean guide, peak label, duration colors, 900 ms sample transitions and
+new-sample endpoint ripples. Active illumination follows the real curve; prolonged
+activity waits strengthen the card contour. Session changes reset animation, missing
+history stays empty, and reduced-motion preferences are respected. No extra network
+requests or AI calls. The 368 × 374 layout and activity timer are retained.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.14 — 2026-10-21
+
+Active route probes now run every 10 seconds, retaining the five-second probe timeout
+and non-overlapping rounds. The UI interval label follows the collector snapshot.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.13 — 2026-10-20
+
+The reset radar now retains recent public completion records for 10 hours when no
+new schedule exists. A mint "已重置" status shows how long ago the publisher announced
+or recorded completion. Banked credits have a separate label; stale sources and
+other-plan/five-hour-only events cannot claim a fresh Pro weekly reset.
+The general network tile is now labeled "上网节点", while its configured proxy target remains unchanged.
+
 ## FOX CODEX HUD 1.3.0-beta.8.corner.12 — 2026-10-20
 
 Windows corner edition with soft vector halos, severity-dependent pulses, timeout ripple contours,

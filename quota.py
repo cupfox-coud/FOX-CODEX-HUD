@@ -109,7 +109,7 @@ def read_limits(codex_home: Path, timeout: float = 25, executable: str | None = 
 
     try:
         send({"method": "initialize", "id": 0, "params": {"clientInfo": {
-            "name": "codex_token_hud", "title": "Codex Token HUD", "version": "1.3.0-beta.8.corner.12"}}})
+            "name": "codex_token_hud", "title": "Codex Token HUD", "version": "1.3.0-beta.8.corner.15"}}})
         response(0)
         send({"method": "initialized", "params": {}})
         send({"method": "account/rateLimits/read", "id": 1})

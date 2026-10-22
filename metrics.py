@@ -230,7 +230,8 @@ class Measurements:
                 "response_duration": {
                     "mean_ms": sum(row["duration_ms"] for row in durations) / len(durations) if durations else None,
                     "count": len(durations), "limit": 20,
-                    "last_ms": durations[-1]["duration_ms"] if durations else None},
+                    "last_ms": durations[-1]["duration_ms"] if durations else None,
+                    "samples": [dict(row) for row in durations]},
                 "turn_active": self.turn_active,
                 "turn_id": self.turn_id, "turn_output_tokens": self.turn_output,
                 "sample_count": self.sample_count, "output_total": self.output_total,
@@ -581,7 +582,7 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
     latency = None
     if network_latency and not once:
         from latency import LatencyPoller
-        latency = LatencyPoller(interval=30)
+        latency = LatencyPoller()
     radar = None
     if reset_radar and not once:
         from reset_radar import ResetRadarPoller
