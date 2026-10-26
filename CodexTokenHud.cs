@@ -591,6 +591,9 @@ namespace CodexTokenHud
                     {"stage", stageText}, {"left", Left}, {"top", Top}, {"width", Width}, {"height", Height},
                     {"corner_mode", configuration.CornerMode}, {"corner_monitor", cornerScreen},
                     {"click_through", configuration.CornerMode && cornerClickThrough}, {"opacity", Opacity},
+                    {"animation_mode", configuration.CornerMotion}, {"animation_enabled", motionAllowed},
+                    {"system_animation_enabled", systemMotionAllowed}, {"animation_frames", motionPaintCount},
+                    {"animation_timer_hz", SystemInformation.TerminalServerSession ? 10 : 25},
                     {"account_quota", Json.Object(data, "account_quota")}, {"quota_cached", quotaCached},
                     {"network_latency", Json.Object(data, "network_latency")},
                     {"activity_title", activity.Title}, {"activity_detail", activity.Detail},
@@ -598,6 +601,10 @@ namespace CodexTokenHud
                     {"activity_average_ms", activity.AverageMs}, {"activity_completed_count", activity.CompletedCount},
                     {"activity_wait_level", activity.WaitLevel},
                     {"reset_radar", Json.Object(data, "reset_radar")}, {"reset_radar_text", resetRadar == null ? "" : resetRadar.Countdown},
+                    {"reset_radar_signal", radarMotion.Active}, {"reset_radar_notice", radarMotion.Notice},
+                    {"reset_radar_burst", radarMotion.Bursting(MotionMs)}, {"reset_radar_last_notice", lastResetNoticeTitle},
+                    {"reset_radar_last_notice_kind", lastResetNoticeKind}, {"reset_radar_last_notice_at_ms", lastResetNoticeAt},
+                    {"reset_radar_attention", radarMotion.Active ? (radarMotion.Confirmed ? "completed" : radarMotion.Urgent ? "urgent" : "forecast") : "none"},
                     {"updated_at", DateTime.UtcNow.ToString("o")} });
             }
         }
@@ -796,7 +803,7 @@ namespace CodexTokenHud
             if (cornerShapeSize != ClientSize || Region == null)
             {
                 cornerShapeSize = ClientSize;
-                using (var path = RoundedCard(new RectangleF(0, 0, Width, Height), (float)(13 * scale)))
+                using (var path = RoundedCard(new RectangleF(0, 0, Width, Height), (float)(26 * scale)))
                 {
                     var old = Region;
                     Region = new Region(path);
@@ -1140,6 +1147,14 @@ namespace CodexTokenHud
                     opacityItem.Checked = Math.Abs(Opacity - percentage / 100.0) < 0.01;
                     opacityItem.Click += delegate { Opacity = configuration.CornerOpacity = chosen / 100.0; SetCornerClickThrough(cornerClickThrough); configuration.SaveCornerSettings(); };
                 }
+                var motionMenu = menu.Items.Add("面板动效") as ToolStripMenuItem;
+                foreach (string mode in new[] { "on", "system", "off" })
+                {
+                    string chosen = mode;
+                    var item = motionMenu.DropDownItems.Add(mode == "on" ? "完整动效" : mode == "off" ? "静态显示" : "跟随系统") as ToolStripMenuItem;
+                    item.Checked = configuration.CornerMotion == mode;
+                    item.Click += delegate { SetCornerMotion(chosen); };
+                }
                 var monitors = menu.Items.Add("显示屏幕") as ToolStripMenuItem;
                 foreach (var screen in Screen.AllScreens)
                 {
@@ -1233,6 +1248,11 @@ namespace CodexTokenHud
             smallFont.Dispose(); labelFont.Dispose(); speedFont.Dispose(); tooltip.Dispose(); tray.Dispose();
             cornerHeaderFont.Dispose(); cornerSmallFont.Dispose(); cornerSpeedFont.Dispose(); cornerCacheFont.Dispose(); cornerQuotaFont.Dispose();
             cornerTimerFont.Dispose(); cornerNumberFont.Dispose(); cornerValueFont.Dispose(); cornerTitleFont.Dispose();
+            cornerRadarFont.Dispose();
+            cornerHeroFont.Dispose(); cornerBrandFont.Dispose(); cornerMicroFont.Dispose();
+            if (cornerBackdrop != null) cornerBackdrop.Dispose();
+            if (cornerBlueLight != null) cornerBlueLight.Dispose();
+            if (cornerMintLight != null) cornerMintLight.Dispose();
             base.OnFormClosing(e);
         }
         protected override void OnFormClosed(FormClosedEventArgs e)

@@ -14,9 +14,18 @@ namespace CodexTokenHud
         internal string Hint = "公开排期来自 Did Codex Reset；时间可能变化，不代表本账号已到账。";
         internal string State = "loading";
         internal bool Alert;
+        internal bool CalendarTime;
         internal string UpcomingId = "";
         internal double? UpcomingStartMs;
         internal double? UpcomingEndMs;
+        internal string PredictionKind = "", CompletionEventId = "";
+        internal bool HasSignal { get { return State == "completed" || State == "deadline" ||
+            State == "estimated" || State == "scheduled" || State == "window" || State == "date"; } }
+        internal string SignalIdentity { get { return State == "completed" ? CompletionEventId : UpcomingId; } }
+        internal string SignalKey { get { return !HasSignal ? "" : State == "completed" ?
+            "complete:" + CompletionEventId + ":" + Countdown : "schedule:" + UpcomingId + ":" + PredictionKind + ":" +
+            UpcomingStartMs.GetValueOrDefault().ToString("0", CultureInfo.InvariantCulture) + ":" +
+            UpcomingEndMs.GetValueOrDefault().ToString("0", CultureInfo.InvariantCulture); } }
 
         private const double MaxEpochMs = 253402300799999;
         private const double DayMs = 86400000;
@@ -97,6 +106,7 @@ namespace CodexTokenHud
                 ((int)(age / 3600000)).ToString(CultureInfo.InvariantCulture) + "小时前";
             string basis = Json.Text(item, "time_basis") == "announced" ? "公告" : "完成";
             result.State = "completed";
+            result.CompletionEventId = Json.Text(item, "id");
             result.Title = "重置雷达 · 公开记录";
             result.Countdown = Json.Text(item, "reset_type") == "banked" ? "次数已发放" : "已重置";
             result.Detail = basis + " · " + ago;
@@ -160,9 +170,9 @@ namespace CodexTokenHud
                 if (scheduleReason == "schedule_time_unknown" || scheduleReason == "invalid_schedule")
                 {
                     result.State = "unknown";
-                    result.Countdown = "时间待确认";
-                    result.Detail = "预告未给出明确时刻";
-                    result.Hint += " 公开预告时间不明确，暂不提供倒计时或提醒。";
+                    result.Countdown = "暂无日期";
+                    result.Detail = "等待网站补充时间";
+                    result.Hint += " 网站尚未提供有效日期。";
                     return result;
                 }
                 result.State = "none";
@@ -175,17 +185,47 @@ namespace CodexTokenHud
             double? start = Number(upcoming, "start_ms");
             double? end = Number(upcoming, "end_ms");
             bool endWasProvided = Json.Get(upcoming, "end_ms") != null;
+            bool deadline = precision == "deadline" ||
+                (precision != "date" && Json.Text(upcoming, "constraint") == "deadline");
+            bool calendar = deadline || precision == "estimated" || precision == "unknown";
             if (!Timestamp(start) || (endWasProvided && (!Timestamp(end) || end.Value < start.Value)) ||
-                (precision != "exact" && precision != "window" && precision != "date") ||
+                (!calendar && precision != "exact" && precision != "window" && precision != "date") ||
                 (precision == "window" && (!Timestamp(end) || end.Value <= start.Value)))
             {
                 result.State = "unknown";
-                result.Countdown = "时间待确认";
-                result.Detail = weekly ?? "预告未给出明确时刻";
+                result.Countdown = "暂无日期";
+                result.Detail = "等待网站补充时间";
+                return result;
+            }
+
+            if (calendar)
+            {
+                result.PredictionKind = deadline ? "deadline" : "estimated";
+                double target = deadline && end.HasValue ? end.Value : start.Value;
+                bool elapsed = target <= nowMs;
+                if (elapsed && ShowRecentCompletion(result, radar, nowMs)) return result;
+                DateTime date = LocalDate(target);
+                string format = date.Year == LocalDate(nowMs).Year ? "MM/dd HH:mm" : "yyyy/MM/dd HH:mm";
+                result.Title = "重置雷达 · 预计";
+                result.State = elapsed ? "expired" : deadline ? "deadline" : "estimated";
+                result.CalendarTime = true;
+                result.Countdown = (deadline ? "最晚 " : "预计 ") + date.ToString(format, CultureInfo.InvariantCulture) + (deadline ? " 前" : "");
+                result.Detail = elapsed ? "预估已过 · 等待更新" : "剩余 " + Duration(target - nowMs);
+                result.Alert = !elapsed && target - nowMs <= 1800000;
+                if (!elapsed)
+                {
+                    result.UpcomingId = Json.Text(upcoming, "id");
+                    result.UpcomingStartMs = start;
+                    result.UpcomingEndMs = end;
+                }
+                result.Hint += " 网站" + (deadline ? "预计最晚 " : "推测时间 ") +
+                    date.ToString("yyyy年MM月dd日 HH:mm", CultureInfo.InvariantCulture) + (deadline ? " 之前。" : "。") +
+                    " 此日期直接来自 API，按本机时区显示，会随网站预告更新。";
                 return result;
             }
 
             result.UpcomingId = Json.Text(upcoming, "id");
+            result.PredictionKind = precision;
             result.UpcomingStartMs = start;
             result.UpcomingEndMs = end;
             bool expired = precision == "exact" ? nowMs >= start.Value : end.HasValue ? nowMs >= end.Value :

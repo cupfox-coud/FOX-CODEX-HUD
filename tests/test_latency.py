@@ -12,7 +12,7 @@ import latency
 
 def catalog():
     return {"proxies": {
-        "🧠 AI节点": {"type": "Selector", "now": "🧠 AI自动", "all": ["🧠 AI自动"]},
+        "🧠 AI服务": {"type": "Selector", "now": "🧠 AI自动", "all": ["🧠 AI自动"]},
         "🧠 AI自动": {"type": "URLTest", "now": "US AI", "all": ["US AI", "JP"]},
         "US AI": {"type": "Vless"},
         "JP": {"type": "Vless"},
@@ -65,7 +65,7 @@ class DiscoveryTests(unittest.TestCase):
 
 class MeasurementTests(unittest.TestCase):
     def measure(self, values=None, data=None):
-        values = values or {"🧠 AI节点": 252, "苏菲家宽": 134}
+        values = values or {"🧠 AI服务": 252, "苏菲家宽": 134}
         requests = []
         def request(controller, path, timeout):
             requests.append((path, timeout))
@@ -85,7 +85,7 @@ class MeasurementTests(unittest.TestCase):
         result, requests = self.measure()
         ai, general = result["nodes"]
         self.assertEqual(result["state"], "ok")
-        self.assertEqual(ai["chain"], ["🧠 AI节点", "🧠 AI自动", "US AI"])
+        self.assertEqual(ai["chain"], ["🧠 AI服务", "🧠 AI自动", "US AI"])
         self.assertEqual(ai["selected"], "US AI")
         self.assertEqual(general["proxy"], "苏菲家宽")
         self.assertEqual([ai["delay_ms"], general["delay_ms"]], [252, 134])
@@ -94,28 +94,39 @@ class MeasurementTests(unittest.TestCase):
         self.assertNotIn("secret-never-in-result", json.dumps(result))
 
     def test_timeout_is_not_zero_and_other_route_can_succeed(self):
-        result, _ = self.measure({"🧠 AI节点": latency.LatencyError("timeout"), "苏菲家宽": 201})
+        result, _ = self.measure({"🧠 AI服务": latency.LatencyError("timeout"), "苏菲家宽": 201})
         self.assertEqual(result["state"], "partial")
         self.assertEqual(result["nodes"][0]["state"], "timeout")
         self.assertIsNone(result["nodes"][0]["delay_ms"])
         self.assertIsNotNone(result["nodes"][0]["measured_at_ms"])
+        self.assertEqual(result["nodes"][1]["delay_ms"], 201)
+
+    def test_retired_ai_group_is_ignored_and_browsing_route_is_retained(self):
+        data = catalog()
+        data["proxies"]["AI节点"] = {"type": "Selector", "now": "JP"}
+        result, requests = self.measure(data=data)
+        self.assertEqual([(n["id"], n["label"]) for n in result["nodes"]],
+                         [("ai", "AI服务"), ("general", "苏菲家宽")])
+        requested_names = [unquote(urlsplit(path).path) for path, _ in requests]
+        self.assertNotIn("/proxies/AI节点/delay", requested_names)
+        self.assertIn("/proxies/苏菲家宽/delay", requested_names)
 
     def test_missing_or_zero_or_nonfinite_delay_is_unavailable(self):
         for value in (0, -1, None, True, "142", float("nan"), float("inf")):
-            result, _ = self.measure({"🧠 AI节点": value, "苏菲家宽": 100})
+            result, _ = self.measure({"🧠 AI服务": value, "苏菲家宽": 100})
             self.assertEqual(result["nodes"][0]["state"], "unavailable", repr(value))
             self.assertIsNone(result["nodes"][0]["delay_ms"])
 
     def test_ambiguous_name_is_not_guessed(self):
         data = catalog()
-        data["proxies"]["🤖 AI节点"] = {"type": "Selector", "now": "JP"}
+        data["proxies"]["🤖 AI服务"] = {"type": "Selector", "now": "JP"}
         result, requests = self.measure(data=data)
         self.assertEqual(result["nodes"][0]["reason"], "proxy_ambiguous")
         self.assertEqual(len(requests), 2)
 
     def test_missing_proxy_and_selection_cycle_fail_safely(self):
         data = catalog()
-        data["proxies"]["🧠 AI自动"]["now"] = "🧠 AI节点"
+        data["proxies"]["🧠 AI自动"]["now"] = "🧠 AI服务"
         del data["proxies"]["苏菲家宽"]
         result, requests = self.measure(data=data)
         self.assertEqual(result["state"], "unavailable")
@@ -145,7 +156,7 @@ class MeasurementTests(unittest.TestCase):
             self.assertIsNone(node["proxy"])
 
     def test_unexpected_error_body_or_credentials_are_not_returned(self):
-        result, _ = self.measure({"🧠 AI节点": ValueError("secret authentication body"), "苏菲家宽": 100})
+        result, _ = self.measure({"🧠 AI服务": ValueError("secret authentication body"), "苏菲家宽": 100})
         self.assertEqual(result["nodes"][0]["reason"], "request_failed")
         self.assertNotIn("secret authentication body", json.dumps(result))
 

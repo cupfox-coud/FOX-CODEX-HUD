@@ -1,5 +1,59 @@
 # Changelog
 
+## FOX CODEX HUD 1.3.0-beta.8.corner.21 — 2026-10-24
+
+The tray now offers full motion, system preference and static display independently
+of the Windows client-area animation switch. The default still follows Windows;
+an explicit full-motion choice persists across restarts. Runtime diagnostics expose
+the selected mode, effective state, system preference and animated frame count.
+
+Moving ambient light, fine fixed grain, reflective rims and inset edges give the
+graphite material depth in ordinary operation. Fresh route samples illuminate the
+matching tile for 2.4 seconds. Radar scanning remains visible without a forecast;
+it does not create a signal or notification. Actual forecasts retain stronger
+gold sweeps and confirmed completions retain mint feedback. Static mode preserves
+legibility and signal emphasis with no decorative motion. No system setting changes.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.20 — 2026-10-24
+
+The left route now probes the merged AI服务 group. The right 上网节点 tile
+continues probing 苏菲家宽 independently, including when the AI route fails.
+
+Graphite Glass redesign: a 400×536 logical-pixel card with a restrained ambient
+material, large quota typography, a dedicated radar surface, paired route cards,
+separate throughput/cache metrics and an expanded response chart. Signal-driven
+radar sweeps and rings complement the existing 12-second arrival emphasis and
+deduplicated system notifications. Numeric readings stay exact. Reduced motion,
+click-through, tray controls, deadlines and source-freshness checks are retained.
+The static material is cached; animation performs no I/O or additional probes.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.18 — 2026-10-22
+
+Every valid reset forecast now keeps a warm highlighted radar tile with a gentle
+breathing outline; confirmed public completions use mint. New or changed signals
+briefly emphasize the full card border and show a twelve-second arrival caption.
+Near forecasts strengthen to orange. Reduced-motion mode keeps static emphasis.
+Notifications now recognize deadline/type/window-end changes under the same event
+ID while suppressing unchanged repeats. Animation adds no network requests or
+custom sound playback.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.17 — 2026-10-22
+
+Public deadline predictions now show the API's upper-bound date directly as
+"最晚 MM/dd HH:mm 前", with an estimate label and remaining time. Inferred point
+estimates retain their supplied date. Passed predictions keep their reference
+date with an expired label until the website updates; confirmed completion
+records still take priority. The compact card fits calendar labels without
+changing its size, and notifications distinguish deadlines from reset times.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.16 — 2026-10-22
+
+The public reset radar now follows the Windows system HTTP proxy for HTTPS
+requests, with verified TLS through CONNECT. Explicit HTTPS_PROXY and NO_PROXY
+settings remain authoritative. Unrelated applications' proxy environment
+variables no longer suppress Windows proxy discovery. Polling intervals,
+rate-limit handling and source freshness checks are retained.
+
 ## FOX CODEX HUD 1.3.0-beta.8.corner.15 — 2026-10-21
 
 The compact activity card now plots the same latest 20 completed responses used by its

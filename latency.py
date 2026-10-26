@@ -1,4 +1,4 @@
-"""Actively measure two selected Clash/Mihomo routes without changing routing.
+"""Actively measure the selected AI service and browsing routes without changing routing.
 
 The controller is restricted to local named pipes or loopback HTTP. Secrets are
 read from the local running config into memory only; errors never expose bodies,
@@ -27,7 +27,7 @@ TEST_URL = "https://www.gstatic.com/generate_204"
 TIMEOUT_MS = 5000
 POLL_INTERVAL_SECONDS = 10
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-TARGETS = (("ai", "AI节点"), ("general", "苏菲家宽"))
+TARGETS = (("ai", "AI服务"), ("general", "苏菲家宽"))
 
 
 class LatencyError(Exception):
@@ -367,7 +367,7 @@ def measure_once(config_dir: Path | None = None, *, controllers: list[Controller
             node.update(state="unavailable", delay_ms=None, reason="request_failed")
         node["measured_at_ms"] = time.time() * 1000
 
-    # Both targets probe independently; no pool threads live beyond this round.
+    # Probe only configured targets; no worker threads live beyond this round.
     workers = [threading.Thread(target=measure, args=(node,), daemon=True) for node in result["nodes"]]
     for worker in workers:
         worker.start()
@@ -380,7 +380,7 @@ def measure_once(config_dir: Path | None = None, *, controllers: list[Controller
 
 
 class LatencyPoller:
-    """Non-blocking snapshots; two fresh route probes every ten seconds."""
+    """Non-blocking snapshots; independent AI service and browsing route probes."""
     def __init__(self, interval: float = POLL_INTERVAL_SECONDS, config_dir: Path | None = None, *, sampler=None):
         self.interval = max(5.0, interval)
         self.config_dir = config_dir

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -50,7 +50,7 @@ class CornerHudTests
             int margin = (int)Math.Round(18 * scale);
             Check(hud.Right == target.WorkingArea.Right - margin && hud.Top == target.WorkingArea.Top + margin,
                 "card is anchored at the secondary monitor top-right in physical coordinates");
-            Check(hud.Width == (int)Math.Round(368 * scale) && hud.Height == (int)Math.Round(374 * scale),
+            Check(hud.Width == (int)Math.Round(400 * scale) && hud.Height == (int)Math.Round(536 * scale),
                 "compact card respects the destination monitor DPI");
             Check(Native.IsWindowVisible(hud.Handle) && Native.IsTopmost(hud.Handle) && Native.GetForegroundWindow() == foreground,
                 "card stays visible without any Codex window and never takes focus");
@@ -203,6 +203,8 @@ class CornerHudTests
             metrics["stage"] = "generating";
             foreach (int seconds in new[] {12, 45, 90, 150})
             {
+                now = (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                fixture["updated_at_ms"] = now;
                 metrics["last_event_at_ms"] = now - seconds * 1000;
                 var ai = Json.List(Json.Object(fixture, "network_latency"), "nodes").First();
                 ai["delay_ms"] = seconds == 150 ? (object)null : seconds == 90 ? 1050 : 223;
@@ -228,6 +230,21 @@ class CornerHudTests
             Call(hud, "UpdateMetrics");
             SavePreview(hud, Path.Combine(root, "build", "corner-reset-scheduled.png"));
             Check(((ResetRadarDisplay)Field(hud, "resetRadar")).Alert, "near scheduled reset is prominent in the small radar card");
+            foreach (string prediction in new[] {"deadline", "estimated"})
+            {
+                radar["upcoming"] = new Dictionary<string, object> {{"id", "demo-prediction"}, {"kind", "reset_scheduled"},
+                    {"start_ms", now + 7200000}, {"end_ms", now + 7200000}, {"precision", prediction}};
+                Call(hud, "UpdateMetrics");
+                SavePreview(hud, Path.Combine(root, "build", "corner-reset-" + prediction + ".png"));
+                Check(((ResetRadarDisplay)Field(hud, "resetRadar")).CalendarTime,
+                    prediction + " renders the publisher's absolute date in the actual card");
+            }
+            double nextYear = (new DateTime(DateTime.Now.Year + 1, 1, 1, 2, 0, 0, DateTimeKind.Local).ToUniversalTime() -
+                new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+            radar["upcoming"] = new Dictionary<string, object> {{"id", "demo-year"}, {"precision", "deadline"},
+                {"start_ms", nextYear}, {"end_ms", nextYear}};
+            Call(hud, "UpdateMetrics");
+            SavePreview(hud, Path.Combine(root, "build", "corner-reset-deadline-next-year.png"));
             radar["upcoming"] = null;
             radar["latest_events"] = new object[] {new Dictionary<string, object> {
                 {"id", "demo-completed"}, {"kind", "reset_completed"}, {"reset_type", "global"},
@@ -243,11 +260,106 @@ class CornerHudTests
                 ((string)Field(hud, "quotaNotice")).Contains("等待同步"), "passed reset hides the old balance without guessing a new percentage");
             CheckDiagnostics(temporary);
             CheckMotion(hud, root);
+            CheckRadarMotion(hud, root);
+            CheckMotionPreferences(hud, config);
+            SaveDesignAnimation(hud, root);
             Console.WriteLine("Corner HUD checks passed: " + checks);
             return 0;
         }
         catch (Exception error) { Console.Error.WriteLine(error); return 1; }
         finally { if (hud != null) { hud.Close(); hud.Dispose(); } }
+    }
+
+    static void CheckMotionPreferences(Hud hud, RuntimeConfiguration config)
+    {
+        var resolve = typeof(Hud).GetMethod("ResolveMotion", BindingFlags.NonPublic | BindingFlags.Static);
+        Check((bool)resolve.Invoke(null, new object[] {"on", false}),
+            "explicit full motion remains on even when Windows client-area animation is disabled");
+        Check(!(bool)resolve.Invoke(null, new object[] {"off", true}), "explicit static mode overrides Windows animation");
+        Check(!(bool)resolve.Invoke(null, new object[] {"system", false}) &&
+              (bool)resolve.Invoke(null, new object[] {"system", true}), "system mode respects both Windows preference states");
+        Call(hud, "BuildMenu");
+        var menu = (ContextMenuStrip)Field(hud, "menu");
+        var choices = menu.Items.Cast<ToolStripItem>().OfType<ToolStripMenuItem>().Single(i => i.Text == "面板动效");
+        choices.DropDownItems.Cast<ToolStripItem>().Single(i => i.Text == "完整动效").PerformClick();
+        Check((bool)Field(hud, "motionAllowed") && config.CornerMotion == "on" &&
+              Json.Text(Json.Read(Path.Combine(config.DataDirectory, "settings.json")), "corner_motion") == "on",
+              "full-motion tray command takes effect immediately and persists for restart");
+        choices.DropDownItems.Cast<ToolStripItem>().Single(i => i.Text == "静态显示").PerformClick();
+        Check(!(bool)Field(hud, "motionAllowed") && config.CornerMotion == "off", "static tray command stops decorative motion");
+        choices.DropDownItems.Cast<ToolStripItem>().Single(i => i.Text == "跟随系统").PerformClick();
+        Check((bool)Field(hud, "motionAllowed") == (bool)Field(hud, "systemMotionAllowed") && config.CornerMotion == "system",
+              "system tray command restores the current Windows preference");
+    }
+
+    // Render the shipping painter, with fixture data and a deterministic visual clock.
+    // These frames are documentation artifacts; no runtime notification is emitted.
+    static void SaveDesignAnimation(Hud hud, string root)
+    {
+        double now = (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+        var fixture = (Dictionary<string, object>)Field(hud, "data");
+        fixture["updated_at_ms"] = now;
+        Json.Object(fixture, "account_quota")["windows"] = new object[] {new Dictionary<string, object> {
+            {"window_minutes", 10080}, {"remaining_percent", 59}, {"resets_at", now / 1000 + 86400 * 6}}};
+        fixture["network_latency"] = new Dictionary<string, object> {{"state", "ok"}, {"updated_at_ms", now},
+            {"nodes", new object[] {Node("ai", 223, now), Node("general", 66, now)}}};
+        fixture["reset_radar"] = new Dictionary<string, object> {{"state", "ok"}, {"fetched_at_ms", now}, {"source_updated_at_ms", now},
+            {"upcoming", new Dictionary<string, object> {{"id", "design-preview"}, {"precision", "deadline"},
+                {"start_ms", now + 7200000}, {"end_ms", now + 7200000}}}};
+        var metrics = Json.Object(fixture, "metrics");
+        metrics["turn_active"] = true; metrics["stage"] = "generating"; metrics["last_event_at_ms"] = now - 12000;
+        var last = Json.Object(metrics, "last");
+        last["measured_at_ms"] = now;
+        double clock = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        Set(hud, "previewMotionClock", clock);
+        Set(hud, "motionAllowed", true);
+        Set(hud, "nextMotionPreference", double.MaxValue);
+        Call(hud, "UpdateMetrics");
+        var frames = Path.Combine(root, "build", "design21-frames");
+        Directory.CreateDirectory(frames);
+        try
+        {
+            for (int i = 0; i < 75; i++)
+            {
+                Set(hud, "previewMotionClock", clock + i * 80);
+                SavePreview(hud, Path.Combine(frames, i.ToString("000") + ".png"));
+            }
+            // Normal operation must visibly move even with no reset announcement or active response.
+            Json.Object(fixture, "reset_radar")["upcoming"] = null;
+            metrics["turn_active"] = false;
+            Call(hud, "UpdateMetrics");
+            Set(hud, "previewMotionClock", clock + 8000);
+            SavePreview(hud, Path.Combine(root, "build", "motion21-idle-a.png"));
+            Set(hud, "previewMotionClock", clock + 9500);
+            SavePreview(hud, Path.Combine(root, "build", "motion21-idle-b.png"));
+            using (var a = new Bitmap(Path.Combine(root, "build", "motion21-idle-a.png")))
+            using (var b = new Bitmap(Path.Combine(root, "build", "motion21-idle-b.png")))
+            {
+                int changed = 0;
+                for (int y = 0; y < a.Height; y += 2)
+                    for (int x = 0; x < a.Width; x += 2)
+                    {
+                        var p = a.GetPixel(x, y); var q = b.GetPixel(x, y);
+                        if (Math.Abs(p.R - q.R) + Math.Abs(p.G - q.G) + Math.Abs(p.B - q.B) > 6) changed++;
+                    }
+                Check(changed > 1000, "idle material and scanning create clearly different native frames without inventing a radar signal");
+                Check(!(bool)Field(Field(hud, "radarMotion"), "Active"), "idle scanning does not create a reset signal");
+            }
+            Set(hud, "motionAllowed", false);
+            Json.Object(fixture, "network_latency")["updated_at_ms"] =
+                (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds + 1000;
+            Set(hud, "previewMotionClock", clock + 10000);
+            SavePreview(hud, Path.Combine(root, "build", "motion21-static-a.png"));
+            Set(hud, "previewMotionClock", clock + 11500);
+            SavePreview(hud, Path.Combine(root, "build", "motion21-static-b.png"));
+            Check(File.ReadAllBytes(Path.Combine(root, "build", "motion21-static-a.png")).SequenceEqual(
+                File.ReadAllBytes(Path.Combine(root, "build", "motion21-static-b.png"))),
+                "static mode produces identical frames as the visual clock advances");
+        }
+        finally { Set(hud, "previewMotionClock", null); }
+        Check((int)Field(Field(hud, "aiMotion"), "Level") == 0 &&
+              (int)Field(Field(hud, "generalMotion"), "Level") == 0,
+              "both independent route cards render healthy measurements after AI group migration");
     }
 
     static void Collect()
@@ -268,6 +380,11 @@ class CornerHudTests
             var paintWatch = System.Diagnostics.Stopwatch.StartNew();
             for (int i = 0; i < 2000; i++)
             {
+                // The production collector sends heartbeats while the painter runs.
+                // Keep that condition in the stress fixture even on slower machines.
+                if (i % 100 == 0)
+                    ((Dictionary<string, object>)Field(hud, "data"))["updated_at_ms"] =
+                        (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
                 Call(hud, "PaintCorner", graphics);
                 if (i % 100 == 0) Application.DoEvents();
             }
@@ -313,6 +430,65 @@ class CornerHudTests
         Check(File.ReadAllText(blocked) == "fixture", "diagnostic write failure does not escape to the application");
     }
 
+    static void CheckRadarMotion(Hud hud, string root)
+    {
+        var motion = Field(hud, "radarMotion");
+        var update = motion.GetType().GetMethod("Update", Private);
+        var tone = motion.GetType().GetMethod("Tone", Private);
+        var burst = motion.GetType().GetMethod("Bursting", Private);
+        var view = new ResetRadarDisplay {State = "deadline", PredictionKind = "deadline", UpcomingId = "signal-one",
+            UpcomingStartMs = 10000, UpcomingEndMs = 20000};
+        update.Invoke(motion, new object[] {view, 1000.0});
+        Check((bool)Field(motion, "Active") && (bool)burst.Invoke(motion, new object[] {1000.0}),
+            "any valid deadline starts visual attention without waiting for the near-time threshold");
+        update.Invoke(motion, new object[] {view, 2000.0});
+        Check((double)Field(motion, "ChangedAt") == 1000, "unchanged radar polls do not restart the arrival effect");
+        Check(!(bool)burst.Invoke(motion, new object[] {14000.0}) && (bool)Field(motion, "Active"),
+            "arrival effect settles after twelve seconds while persistent signal highlighting remains");
+        view.UpcomingEndMs = 25000;
+        update.Invoke(motion, new object[] {view, 3000.0});
+        Check((string)Field(motion, "Notice") == "预告时间已更新", "changed deadline triggers a distinct visual update");
+        view.Alert = true;
+        update.Invoke(motion, new object[] {view, 4000.0});
+        Check((bool)Field(motion, "Urgent") && ((Color)tone.Invoke(motion, new object[] {4000.0})).ToArgb() == Color.FromArgb(255, 164, 106).ToArgb(),
+            "near forecast strengthens the signal with an orange attention color");
+        view.State = "unavailable";
+        update.Invoke(motion, new object[] {view, 5000.0});
+        Check(!(bool)Field(motion, "Active"), "offline radar cannot keep highlighting stale predictions as active signals");
+        view.State = "deadline"; view.Alert = false;
+        update.Invoke(motion, new object[] {view, 6000.0});
+        Check((double)Field(motion, "ChangedAt") == 4000, "recovery of the same forecast does not announce a new event");
+        view.State = "completed"; view.CompletionEventId = "completed-new"; view.Countdown = "已重置";
+        update.Invoke(motion, new object[] {view, 7000.0});
+        Check((bool)Field(motion, "Confirmed") && ((Color)tone.Invoke(motion, new object[] {7000.0})).ToArgb() == Color.FromArgb(115, 230, 195).ToArgb(),
+            "public completion receives its distinct mint signal");
+
+        double now = (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+        var fixture = (Dictionary<string, object>)Field(hud, "data");
+        fixture["updated_at_ms"] = now;
+        var radar = new Dictionary<string, object> {{"state", "ok"}, {"fetched_at_ms", now}, {"source_updated_at_ms", now},
+            {"upcoming", new Dictionary<string, object> {{"id", "visual-preview"}, {"precision", "deadline"},
+                {"start_ms", now + 7200000}, {"end_ms", now + 7200000}}}};
+        fixture["reset_radar"] = radar;
+        Call(hud, "UpdateMetrics");
+        Set(hud, "motionAllowed", true);
+        Set(hud, "nextMotionPreference", double.MaxValue);
+        SavePreview(hud, Path.Combine(root, "build", "corner-radar-new-signal.png"));
+        motion.GetType().GetField("ChangedAt", Private).SetValue(motion, -100000.0);
+        SavePreview(hud, Path.Combine(root, "build", "corner-radar-persistent.png"));
+        Set(hud, "motionAllowed", false);
+        SavePreview(hud, Path.Combine(root, "build", "corner-radar-reduced-motion.png"));
+        Check((bool)Field(motion, "Active"), "reduced-motion display retains the signal through static highlighting");
+        radar["upcoming"] = null;
+        radar["latest_events"] = new object[] {new Dictionary<string, object> {{"id", "preview-confirmed"},
+            {"kind", "reset_completed"}, {"reset_type", "global"}, {"at_ms", now - 1000}, {"time_basis", "completed"}}};
+        Call(hud, "UpdateMetrics");
+        SavePreview(hud, Path.Combine(root, "build", "corner-radar-confirmed.png"));
+        Check((bool)Field(motion, "Confirmed"), "rendered confirmed state remains separate from a deadline prediction");
+        Set(hud, "motionAllowed", true);
+        StressDrawing(hud);
+    }
+
     static void CheckMotion(Hud hud, string root)
     {
         var response = Field(hud, "responseMotion");
@@ -341,16 +517,16 @@ class CornerHudTests
         var motion = Field(hud, "aiMotion");
         var update = motion.GetType().GetMethod("Update", Private);
         var color = motion.GetType().GetMethod("ReadColor", Private);
-        update.Invoke(motion, new object[] {0, Color.Aquamarine, 1.0, 1000.0, "AI节点"});
-        update.Invoke(motion, new object[] {4, Color.Red, 2.0, 2000.0, "AI节点"});
-        Check((string)Field(motion, "Notice") == "AI节点 · 探测超时", "timeout transitions announce a route-specific failure");
-        update.Invoke(motion, new object[] {4, Color.Red, 2.0, 4000.0, "AI节点"});
+        update.Invoke(motion, new object[] {0, Color.Aquamarine, 1.0, 1000.0, "AI服务"});
+        update.Invoke(motion, new object[] {4, Color.Red, 2.0, 2000.0, "AI服务"});
+        Check((string)Field(motion, "Notice") == "AI服务 · 探测超时", "timeout transitions announce a route-specific failure");
+        update.Invoke(motion, new object[] {4, Color.Red, 2.0, 4000.0, "AI服务"});
         Check((double)Field(motion, "ChangedAt") == 2000, "unchanged failure does not restart the notification");
         Check(((Color)color.Invoke(motion, new object[] {2000.0, false})).ToArgb() == Color.Red.ToArgb(),
             "reduced motion immediately uses the accurate severity color");
-        update.Invoke(motion, new object[] {0, Color.Aquamarine, 3.0, 5000.0, "AI节点"});
+        update.Invoke(motion, new object[] {0, Color.Aquamarine, 3.0, 5000.0, "AI服务"});
         Check(((string)Field(motion, "Notice")).Contains("已恢复"), "healthy measurement after failure announces recovery");
-        update.Invoke(motion, new object[] {-1, Color.Gray, 3.0, 6000.0, "AI节点"});
+        update.Invoke(motion, new object[] {-1, Color.Gray, 3.0, 6000.0, "AI服务"});
         Check(!((string)Field(motion, "Notice")).Contains("已恢复"), "stale data is never announced as recovered");
 
         double now = (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;

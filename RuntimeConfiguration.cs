@@ -13,6 +13,7 @@ namespace CodexTokenHud
         internal bool ResetAlerts = true;
         internal string CornerMonitor = "";
         internal double CornerOpacity = 0.78;
+        internal string CornerMotion = "system";
         internal string Runtime { get { return Path.Combine(DataDirectory, "runtime"); } }
         internal string Layout { get { return Path.Combine(DataDirectory, "user-layout.json"); } }
 
@@ -32,6 +33,8 @@ namespace CodexTokenHud
             result.ResetAlerts = !Json.Text(settings, "reset_alerts").Equals("False", StringComparison.OrdinalIgnoreCase);
             result.CornerMonitor = Json.Text(settings, "corner_monitor");
             result.CornerOpacity = Math.Max(0.45, Math.Min(1.0, Json.Number(settings, "corner_opacity") ?? 0.78));
+            string motion = Json.Text(settings, "corner_motion").ToLowerInvariant();
+            result.CornerMotion = motion == "on" || motion == "off" ? motion : "system";
             string home = Json.Text(settings, "codex_home");
             if (string.IsNullOrWhiteSpace(home)) home = Environment.GetEnvironmentVariable("CODEX_HOME");
             if (string.IsNullOrWhiteSpace(home)) home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
@@ -137,6 +140,7 @@ namespace CodexTokenHud
             settings["corner_mode"] = CornerMode;
             settings["corner_monitor"] = CornerMonitor;
             settings["corner_opacity"] = CornerOpacity;
+            settings["corner_motion"] = CornerMotion;
             settings["reset_alerts"] = ResetAlerts;
             Json.Write(Path.Combine(DataDirectory, "settings.json"), settings);
         }

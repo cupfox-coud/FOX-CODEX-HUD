@@ -45,6 +45,38 @@ class ResetNotificationTests
         data = Fixture(); tracker = new ResetNotificationTracker(new Dictionary<string, object>());
         Schedule(data, "unknown", now + 10000, now + 10000);
         Check(tracker.Read(data, now) == null, "unknown schedule precision cannot generate a countdown notification");
+        data = Fixture(); tracker = new ResetNotificationTracker(new Dictionary<string, object>());
+        Schedule(data, "deadline", now - 60000, now + 1200000);
+        var deadlineNotice = tracker.Read(data, now);
+        Check(deadlineNotice.Message.Contains("预计最晚") && deadlineNotice.Message.Contains("20 分钟") &&
+            !deadlineNotice.Message.Contains("窗口已开始"), "deadline notice counts to the upper bound and includes its date");
+        Check(tracker.Read(data, now) == null, "deadline notice is not repeated");
+        double cutoffSoon = now + 700000;
+        data["updated_at_ms"] = cutoffSoon;
+        Json.Object(data, "reset_radar")["fetched_at_ms"] = cutoffSoon;
+        Json.Object(data, "reset_radar")["source_updated_at_ms"] = cutoffSoon;
+        Check(tracker.Read(data, cutoffSoon).Title == "预估截止时间将近", "deadline's approaching notice describes a predicted cutoff");
+        data = Fixture(); tracker = new ResetNotificationTracker(new Dictionary<string, object>());
+        Schedule(data, "estimated", now + 10000, now + 10000);
+        Check(tracker.Read(data, now).Message.Contains("推测重置时间"), "inferred point notice keeps the publisher's estimate visible");
+        data = Fixture(); tracker = new ResetNotificationTracker(new Dictionary<string, object>());
+        Schedule(data, "deadline", now - 1000, now - 1000);
+        Check(tracker.Read(data, now) == null, "elapsed deadline does not generate a future reset notice");
+        data = Fixture(); tracker = new ResetNotificationTracker(new Dictionary<string, object>());
+        Schedule(data, "deadline", now + 3600000, now + 3600000);
+        Check(tracker.Read(data, now).Kind == "forecast", "deadline produces a new-signal notice");
+        Schedule(data, "exact", now + 3600000, now + 3600000);
+        var changedNotice = tracker.Read(data, now);
+        Check(changedNotice.Kind == "schedule_changed" && changedNotice.Title == "重置预告已更新",
+            "same event changing from a deadline to an exact point alerts again");
+        Check(tracker.Read(data, now) == null, "unchanged timing and kind do not repeat an update notice");
+        Schedule(data, "window", now + 3600000, now + 7200000);
+        tracker.Read(data, now);
+        Schedule(data, "window", now + 3600000, now + 7500000);
+        Check(tracker.Read(data, now).Kind == "schedule_changed", "window end changes are meaningful updates even when the start stays fixed");
+        for (int i = 0; i < 140; i++) tracker.Saved["schedule:test:" + i] = now - i;
+        Check(tracker.Read(data, now) == null && tracker.Saved.Count < 128 && tracker.Saved.ContainsKey("active-schedule"),
+            "notification history compaction preserves active identity and supports signature metadata");
         Schedule(data, "exact", now - 1000, now - 1000);
         Check(tracker.Read(data, now) == null, "expired schedule is not falsely announced as a reset");
         Schedule(data, "date", 253402300800000d, 253402300800000d);

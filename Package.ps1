@@ -21,6 +21,11 @@ $taskFiles = @('metrics.py', 'quota.py', 'latency.py', 'reset_radar.py', 'histor
     'CHANGELOG.md', 'PRIVACY.md', 'SECURITY.md', 'CONTRIBUTING.md', 'settings.example.json',
     'Install.ps1', 'Uninstall.ps1', 'Start.ps1', 'Stop.ps1')
 foreach ($taskFile in $taskFiles) { Copy-Item -LiteralPath (Join-Path $taskRoot $taskFile) -Destination $taskStage }
+# Windows PowerShell 5.1 needs a UTF-8 BOM to parse localized strings correctly.
+$taskScriptEncoding = New-Object System.Text.UTF8Encoding($true)
+foreach ($taskScript in Get-ChildItem -LiteralPath $taskStage -Filter '*.ps1' -File) {
+    [IO.File]::WriteAllText($taskScript.FullName, [IO.File]::ReadAllText($taskScript.FullName, [Text.Encoding]::UTF8), $taskScriptEncoding)
+}
 Copy-Item -LiteralPath (Join-Path $taskRoot 'docs') -Destination $taskStage -Recurse
 Copy-Item -LiteralPath (Join-Path $taskRoot 'web') -Destination $taskStage -Recurse
 $taskRuntimeFile = if ($Architecture -eq 'x64') { 'python-runtime.json' } else { "python-runtime-$Architecture.json" }

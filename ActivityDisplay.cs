@@ -147,9 +147,9 @@ namespace CodexTokenHud
                 double? delay = Json.Number(node, "delay_ms");
                 bool validDelay = delay.HasValue && !double.IsNaN(delay.Value) && !double.IsInfinity(delay.Value) && delay.Value > 0;
                 if (result.Severity >= 1 && state == "timeout")
-                    result.Detail = "AI 节点探测超时，可能影响响应";
+                    result.Detail = "AI 服务线路探测超时，可能影响响应";
                 else if (result.Severity >= 1 && state == "ok" && validDelay && delay.Value >= 800)
-                    result.Detail = "AI 节点偏慢，可能影响响应";
+                    result.Detail = "AI 服务线路偏慢，可能影响响应";
                 else if (state == "ok" && validDelay && delay.Value < 800)
                     result.Detail = tools ? "节点探测正常 · 工具仍在执行" : result.Severity == 0 ? "节点探测正常 · 本轮进行中" : "节点探测正常 · 持续等待";
                 break;

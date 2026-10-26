@@ -9,7 +9,7 @@ namespace CodexTokenHud
 {
     internal sealed class ResetNotice
     {
-        internal string Title, Message;
+        internal string Title, Message, Kind;
     }
 
     // Persistent event IDs suppress old announcements and repeated notifications after restart.
@@ -45,7 +45,7 @@ namespace CodexTokenHud
                 string eventType = Json.Text(item, "reset_type");
                 string eventLabel = eventType == "banked" ? "储备重置次数发放" :
                     eventType == "global_and_banked" ? "额度重置及储备次数发放" : "额度重置";
-                notice = new ResetNotice { Title = "检测到新的公共重置信号", Message =
+                notice = new ResetNotice { Kind = "completed", Title = "检测到新的公共重置信号", Message =
                     "Did Codex Reset 报告了新的" + eventLabel + "。个人到账以账户额度为准；HUD 正在重新同步。" };
                 break;
             }
@@ -57,32 +57,45 @@ namespace CodexTokenHud
             double? start = Json.Number(upcoming, "start_ms"), end = Json.Number(upcoming, "end_ms");
             if (scheduleId.Length == 0 || scheduleId.Length > 180 || !start.HasValue || !end.HasValue ||
                 double.IsNaN(start.Value) || double.IsNaN(end.Value) || double.IsInfinity(start.Value) || double.IsInfinity(end.Value) ||
-                start.Value <= 0 || end.Value > 253402300799999d || end.Value < start.Value || end.Value < now ||
-                (precision == "exact" && (start.Value != end.Value || start.Value < now)) ||
-                (precision != "exact" && precision != "date" && precision != "window")) return null;
-            string token = scheduleId + ":" + start.Value.ToString("0", CultureInfo.InvariantCulture);
+                start.Value <= 0 || end.Value > 253402300799999d || end.Value < start.Value || end.Value <= now ||
+                ((precision == "exact" || precision == "estimated") && (start.Value != end.Value || start.Value < now)) ||
+                (precision != "exact" && precision != "estimated" && precision != "deadline" && precision != "date" && precision != "window")) return null;
+            double target = precision == "deadline" ? end.Value : start.Value;
+            string token = scheduleId + ":" + precision + ":" + start.Value.ToString("0", CultureInfo.InvariantCulture) +
+                ":" + end.Value.ToString("0", CultureInfo.InvariantCulture);
             string keySchedule = "schedule:" + token, keySoon = "soon:" + token;
-            double remaining = start.Value - now;
+            double remaining = target - now;
+            string absolute = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+                .AddMilliseconds(target).ToLocalTime().ToString("MM月dd日 HH:mm", CultureInfo.InvariantCulture);
             if (!Seen(keySchedule))
             {
+                bool changed = Json.Text(Saved, "active-schedule-id") == scheduleId && Json.Text(Saved, "active-schedule") != token;
                 Mark(keySchedule, now);
+                Saved["active-schedule-id"] = scheduleId;
+                Saved["active-schedule"] = token;
                 if (remaining <= 600000) Mark(keySoon, now);
-                string timing = precision == "date" ? "公布了 " + new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+                string timing = precision == "deadline" ? "预计最晚 " + absolute + " 前，距预估截止约 " + Countdown(remaining) + "。" :
+                    precision == "estimated" ? "推测重置时间为 " + absolute + "，约 " + Countdown(remaining) + " 后。" :
+                    precision == "date" ? "公布了 " + new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
                     .AddMilliseconds(start.Value).ToLocalTime().ToString("MM月dd日") + " 的重置预告，具体时刻未定。" :
                     remaining <= 0 ? "预计窗口已开始，具体到账时间待确认。" :
                     "距" + (precision == "exact" ? "计划时间" : "预计窗口开始") + "约 " + Countdown(remaining) + "。";
-                return new ResetNotice { Title = "发现新的重置排期", Message =
+                return new ResetNotice { Kind = changed ? "schedule_changed" : "forecast", Title = changed ? "重置预告已更新" : "发现新的重置排期", Message =
                     "Did Codex Reset：" + timing + (Json.Text(upcoming, "reset_type") == "banked" ? "本次是储备重置次数发放。" : "") +
                     "这是公共排期，个人额度以实际同步为准。" };
             }
             if (precision != "date" && remaining > 0 && remaining <= 600000 && !Seen(keySoon))
             {
                 Mark(keySoon, now);
-                return new ResetNotice { Title = "重置排期即将开始", Message =
-                    "距公共" + (precision == "exact" ? "计划时间" : "预计窗口") + "约 " + Countdown(remaining) + "。来源：Did Codex Reset；尚未确认到账。" };
+                return new ResetNotice { Kind = "soon", Title = precision == "deadline" ? "预估截止时间将近" : "重置排期即将开始", Message =
+                    (precision == "deadline" ? "预计最晚 " + absolute + " 前，距预估截止约 " :
+                        precision == "estimated" ? "距网站推测时间约 " :
+                        "距公共" + (precision == "exact" ? "计划时间" : "预计窗口") + "约 ") +
+                    Countdown(remaining) + "。来源：Did Codex Reset；网站预估可能更新。" };
             }
             if (Saved.Count > 128)
-                foreach (string key in Saved.Where(p => p.Key != "baseline").OrderBy(p => Convert.ToDouble(p.Value, CultureInfo.InvariantCulture)).Take(Saved.Count - 96).Select(p => p.Key).ToList())
+                foreach (string key in Saved.Where(p => p.Key != "baseline" && p.Key != "active-schedule" && p.Key != "active-schedule-id")
+                    .OrderBy(p => Convert.ToDouble(p.Value, CultureInfo.InvariantCulture)).Take(Saved.Count - 96).Select(p => p.Key).ToList())
                 { Saved.Remove(key); Changed = true; }
             return null;
         }
@@ -101,19 +114,24 @@ namespace CodexTokenHud
         private ResetRadarDisplay resetRadar;
         private ResetNotificationTracker resetNotifications;
         private DateTime nextResetNotice = DateTime.MinValue;
+        private string lastResetNoticeTitle = "", lastResetNoticeKind = "";
+        private double lastResetNoticeAt;
 
         private void UpdateResetRadar()
         {
             resetRadar = ResetRadarDisplay.Read(data, EpochMs());
+            radarMotion.Update(resetRadar, MotionMs);
             if (!configuration.CornerMode || !configuration.ResetAlerts || DateTime.UtcNow < nextResetNotice) return;
             if (resetNotifications == null) resetNotifications = new ResetNotificationTracker(Json.Read(Path.Combine(runtime, "reset-notifications.json")));
             var notice = resetNotifications.Read(data, EpochMs());
             if (resetNotifications.Changed)
                 try { Json.Write(Path.Combine(runtime, "reset-notifications.json"), resetNotifications.Saved); } catch (IOException) { }
             if (notice == null) return;
+            radarMotion.Announce(notice, MotionMs);
             nextResetNotice = DateTime.UtcNow.AddSeconds(20);
             tray.ShowBalloonTip(12000, notice.Title, notice.Message, ToolTipIcon.Info);
-            if (notice.Title == "检测到新的公共重置信号") RequestRefresh();
+            lastResetNoticeTitle = notice.Title; lastResetNoticeKind = notice.Kind; lastResetNoticeAt = EpochMs();
+            if (notice.Kind == "completed") RequestRefresh();
         }
     }
 }

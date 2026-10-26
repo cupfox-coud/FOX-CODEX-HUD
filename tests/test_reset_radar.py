@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import ssl
 import sys
 import threading
 import time
@@ -92,15 +93,40 @@ class NormalizationTests(unittest.TestCase):
         self.assertIsNotNone(snapshot["upcoming"])
         self.assertEqual(aged["reason"], "schedule_elapsed_unconfirmed")
 
-    def test_inferred_fallback_and_deadline_are_not_exact(self):
+    def test_inferred_and_fallback_points_keep_the_api_estimate(self):
         for changes in ({"scheduleBasis": "contextual_inference"}, {"scheduleBasis": None},
-                        {"scheduleTimingSource": "fallback"}, {"scheduleConstraint": "deadline"}):
+                        {"scheduleTimingSource": "fallback"}):
             result = self.normalize(scheduled(**changes))["upcoming"]
-            self.assertEqual(result["precision"], "unknown")
+            self.assertEqual(result["precision"], "estimated")
+            self.assertEqual(result["start_ms"], NOW + 600000)
         result = self.normalize(scheduled(schedulePrecision="date", scheduleBasis="contextual_inference",
             scheduleWindow={"startAt": iso(NOW), "endAt": iso(NOW + 86400000)}))["upcoming"]
         self.assertEqual(result["precision"], "date")
         self.assertEqual(result["basis"], "contextual_inference")
+
+    def test_deadline_keeps_its_timestamp_and_uses_the_window_end(self):
+        result = self.normalize(scheduled(scheduleConstraint="deadline"))["upcoming"]
+        self.assertEqual(result["precision"], "deadline")
+        self.assertEqual(result["end_ms"], NOW + 600000)
+        result = self.normalize(scheduled(scheduleConstraint="deadline", scheduleWindow={
+            "startAt": iso(NOW - 60000), "endAt": iso(NOW + 600000)}))["upcoming"]
+        self.assertEqual(result["precision"], "deadline")
+        self.assertEqual(result["start_ms"], NOW - 60000)
+        self.assertEqual(result["end_ms"], NOW + 600000)
+
+    def test_elapsed_prediction_remains_visible_without_claiming_completion(self):
+        for changes in ({"scheduleConstraint": "deadline"}, {"scheduleBasis": "contextual_inference"}):
+            result = self.normalize(scheduled(**changes, scheduleWindow={
+                "startAt": iso(NOW - 1000), "endAt": iso(NOW - 1000)}))
+            self.assertIsNotNone(result["upcoming"])
+            self.assertEqual(result["reason"], "schedule_elapsed_unconfirmed")
+            self.assertEqual([event["id"] for event in result["latest_events"]], ["previous-reset"])
+        snapshot = self.normalize(scheduled(scheduleConstraint="deadline"))
+        aged = radar.age_snapshot(snapshot, NOW + 600000)
+        self.assertEqual(aged["upcoming"]["precision"], "deadline")
+        self.assertEqual(aged["reason"], "schedule_elapsed_unconfirmed")
+        snapshot["state"] = "unavailable"
+        self.assertIsNone(radar.age_snapshot(snapshot, NOW)["upcoming"])
 
     def test_other_plan_or_five_hour_only_is_not_a_pro_weekly_hint(self):
         for scope in ({"plans": ["plus"], "windows": ["weekly"]},
@@ -156,6 +182,93 @@ class NormalizationTests(unittest.TestCase):
         for state in ("limited", "stale", "unavailable"):
             result["state"] = state
             self.assertIsNone(radar.age_snapshot(result, NOW)["upcoming"])
+
+
+class ProxyTransportTests(unittest.TestCase):
+    def setUp(self):
+        platform = patch.object(radar.sys, "platform", "win32")
+        platform.start()
+        self.addCleanup(platform.stop)
+        for name, value in (
+                ("getproxies_registry", {"https": "http://127.0.0.1:7897"}),
+                ("proxy_bypass_registry", False)):
+            mocked = patch.object(radar.urllib.request, name, return_value=value, create=True)
+            setattr(self, name, mocked.start())
+            self.addCleanup(mocked.stop)
+        environment = patch.dict(radar.os.environ, {key: value for key, value in radar.os.environ.items()
+            if not key.lower().endswith("_proxy")}, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_unrelated_proxy_variable_cannot_disable_windows_proxy(self):
+        with patch.dict(radar.os.environ, {"GHOST_PROXY": "unrelated"}), patch.object(
+                radar.http.client, "HTTPSConnection") as factory:
+            connection = radar._https_connection(8)
+        self.assertEqual(factory.call_args.args, ("127.0.0.1", 7897))
+        self.assertEqual(factory.call_args.kwargs["timeout"], 8)
+        context = factory.call_args.kwargs["context"]
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        connection.set_tunnel.assert_called_once_with(radar.HOST, 443)
+
+    def test_explicit_https_proxy_overrides_system_proxy(self):
+        with patch.dict(radar.os.environ, {"HTTPS_PROXY": "http://127.0.0.1:8888"}), patch.object(
+                radar.http.client, "HTTPSConnection") as factory:
+            radar._https_connection(8)
+        self.assertEqual(factory.call_args.args, ("127.0.0.1", 8888))
+
+    def test_empty_https_proxy_explicitly_disables_system_proxy(self):
+        with patch.dict(radar.os.environ, {"HTTPS_PROXY": ""}), patch.object(
+                radar.http.client, "HTTPSConnection") as factory:
+            connection = radar._https_connection(8)
+        self.assertEqual(factory.call_args.args, (radar.HOST,))
+        connection.set_tunnel.assert_not_called()
+
+    def test_no_proxy_rule_keeps_matching_destination_direct(self):
+        with patch.dict(radar.os.environ, {"GHOST_PROXY": "unrelated", "NO_PROXY": radar.HOST}), patch.object(
+                radar.http.client, "HTTPSConnection") as factory:
+            connection = radar._https_connection(8)
+        self.assertEqual(factory.call_args.args, (radar.HOST,))
+        connection.set_tunnel.assert_not_called()
+
+    def test_system_bypass_still_applies_with_unrelated_environment(self):
+        self.proxy_bypass_registry.return_value = True
+        with patch.dict(radar.os.environ, {"GHOST_PROXY": "unrelated"}):
+            self.assertIsNone(radar._https_proxy())
+
+    def test_no_system_proxy_keeps_direct_connection(self):
+        self.getproxies_registry.return_value = {}
+        with patch.object(radar.http.client, "HTTPSConnection") as factory:
+            connection = radar._https_connection(8)
+        self.assertEqual(factory.call_args.args, (radar.HOST,))
+        connection.set_tunnel.assert_not_called()
+
+    def test_unsupported_proxies_fail_without_leaking_values_or_bypassing(self):
+        for address in ("socks5://127.0.0.1:7897", "https://127.0.0.1:7897",
+                        "http://private-user:private-password@127.0.0.1:7897",
+                        "http://127.0.0.1:0", "http://127.0.0.1:bad", "http://127.0.0.1:7897/private",
+                        "http://127.0.0.1:7897?secret=value", "http://127.0.0.1:7897\n"):
+            with self.subTest(address=address), patch.dict(radar.os.environ, {"HTTPS_PROXY": address}), patch.object(
+                    radar.http.client, "HTTPSConnection") as factory:
+                with self.assertRaises(radar.RadarError) as caught:
+                    radar.request_json(radar.STATUS_PATH)
+                self.assertEqual(str(caught.exception), "proxy_unsupported")
+                factory.assert_not_called()
+
+    def test_proxy_timeout_is_sanitized_and_connection_is_closed(self):
+        with patch.object(radar.http.client, "HTTPSConnection") as factory:
+            factory.return_value.request.side_effect = TimeoutError("private proxy detail")
+            with self.assertRaises(radar.RadarError) as caught:
+                radar.request_json(radar.STATUS_PATH)
+            self.assertEqual(str(caught.exception), "request_timeout")
+            factory.return_value.close.assert_called_once()
+
+    def test_non_windows_discovery_does_not_read_windows_settings(self):
+        with patch.object(radar.sys, "platform", "linux"), patch.object(
+                radar.urllib.request, "getproxies", return_value={"https": "http://127.0.0.1:9999"}), patch.object(
+                radar.urllib.request, "proxy_bypass", return_value=False):
+            self.assertEqual(radar._https_proxy(), "http://127.0.0.1:9999")
+        self.getproxies_registry.assert_not_called()
 
 
 class RequestTests(unittest.TestCase):

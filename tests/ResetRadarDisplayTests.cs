@@ -43,7 +43,7 @@ class ResetRadarDisplayTests
         {
             Json.Object(data, "reset_radar")["reason"] = reason;
             display = Read(data);
-            Check(display.State == "unknown" && display.Countdown == "时间待确认" && display.Detail == "预告未给出明确时刻" && !display.Alert,
+            Check(display.State == "unknown" && display.Countdown == "暂无日期" && display.Detail == "等待网站补充时间" && !display.Alert,
                 reason + " keeps incomplete public timing explicit");
         }
         Json.Object(data, "reset_radar")["state"] = "stale";
@@ -80,7 +80,34 @@ class ResetRadarDisplayTests
         Upcoming(data, "date", Now - 1000, Now + 86400000);
         Check(Read(data).Countdown == "预计今日" && !Read(data).Alert, "same-day date plan does not trigger an exact-time alert");
         Upcoming(data, "unknown", Now + 60000, null);
-        Check(Read(data).State == "unknown" && Read(data).Countdown == "时间待确认", "unknown precision remains unknown despite a timestamp");
+        Check(Read(data).State == "estimated" && Read(data).CalendarTime && Read(data).Countdown.StartsWith("预计 "),
+            "publisher timestamp with unspecified precision remains a visible estimate");
+
+        Upcoming(data, "deadline", Now - 60000, Now + 600000);
+        display = Read(data);
+        string cutoff = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(Now + 600000)
+            .ToLocalTime().ToString("MM/dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        Check(display.State == "deadline" && display.CalendarTime && display.Countdown == "最晚 " + cutoff + " 前",
+            "deadline shows the API's actual upper-bound date and time");
+        Check(display.Title.Contains("预计") && display.Detail == "剩余 10:00" && display.Alert,
+            "deadline shows its estimate label and time remaining to the upper bound");
+        Check(display.Hint.Contains("直接来自 API") && display.Hint.Contains("时区"),
+            "deadline hint retains source and timezone attribution");
+        Upcoming(data, "unknown", Now + 600000, Now + 600000);
+        Json.Object(Json.Object(data, "reset_radar"), "upcoming")["constraint"] = "deadline";
+        Check(Read(data).Countdown == "最晚 " + cutoff + " 前", "older collectors' deadline constraint still displays the cutoff");
+        Upcoming(data, "estimated", Now + 600000, Now + 600000);
+        Check(Read(data).Countdown == "预计 " + cutoff && Read(data).CalendarTime,
+            "inferred point shows its supplied date without waiting for exact precision");
+        Upcoming(data, "deadline", Now - 600000, Now - 600000);
+        display = Read(data);
+        Check(display.State == "expired" && display.CalendarTime && display.Countdown.StartsWith("最晚 ") &&
+            display.Detail == "预估已过 · 等待更新" && !display.Alert && !display.UpcomingStartMs.HasValue,
+            "elapsed prediction retains the reference date while stopping its alert");
+        Upcoming(data, "deadline", double.NaN, Now + 600000);
+        Check(Read(data).State == "unknown" && !Read(data).CalendarTime, "invalid deadline cannot create an absolute-date label");
+        Upcoming(data, "deadline", Now + 600000, Now + 300000);
+        Check(Read(data).State == "unknown", "backwards deadline bounds remain invalid");
 
         foreach (string state in new[] {"stale", "unavailable", "limited", "loading"})
         {

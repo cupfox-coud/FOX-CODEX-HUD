@@ -13,12 +13,15 @@ from email.utils import parsedate_to_datetime
 import http.client
 import json
 import math
+import os
 import re
 import socket
 import ssl
+import sys
 import threading
 import time
 from urllib.parse import urlsplit
+import urllib.request
 
 
 HOST = "didcodexreset.com"
@@ -92,12 +95,56 @@ def _budget_wait(headers: dict, now_ms: float) -> float:
     return max(MIN_REFRESH_SECONDS, (reset - now_ms) / 1000) if reset else 3600
 
 
+def _https_proxy() -> str | None:
+    """Honor HTTPS proxy/bypass settings, including the Windows system proxy.
+
+    urllib's Windows discovery ignores the registry whenever ANY *_proxy
+    environment variable exists, including unrelated applications' variables.
+    Merge settings by scheme so those variables cannot force this host direct.
+    """
+    environment = urllib.request.getproxies_environment()
+    if sys.platform == "win32":
+        proxies = urllib.request.getproxies_registry()
+        proxies.update(environment)
+        bypass = (urllib.request.proxy_bypass_environment(HOST, environment)
+                  if "no" in environment else urllib.request.proxy_bypass_registry(HOST))
+    else:
+        proxies = urllib.request.getproxies()
+        bypass = urllib.request.proxy_bypass(HOST)
+    # An explicitly empty HTTPS_PROXY disables the inherited system proxy.
+    https_keys = [key for key in os.environ if key.lower() == "https_proxy"]
+    if https_keys and "https" not in environment:
+        return None
+    return None if bypass else proxies.get("https")
+
+
+def _https_connection(timeout: float):
+    proxy = _https_proxy()
+    context = ssl.create_default_context()
+    if not proxy:
+        return http.client.HTTPSConnection(HOST, timeout=timeout, context=context)
+    try:
+        parsed = urlsplit(proxy if "://" in proxy else "http://" + proxy)
+        port = parsed.port if parsed.port is not None else 80
+        if (parsed.scheme != "http" or not parsed.hostname or parsed.username is not None or
+                parsed.password is not None or parsed.path not in ("", "/") or parsed.query or
+                parsed.fragment or not 1 <= port <= 65535 or any(ord(char) < 33 for char in proxy)):
+            raise ValueError("Unsupported proxy")
+    except (TypeError, ValueError):
+        raise RadarError("proxy_unsupported") from None
+    connection = http.client.HTTPSConnection(parsed.hostname, port, timeout=timeout, context=context)
+    # CONNECT carries no account data; TLS still authenticates the fixed host.
+    connection.set_tunnel(HOST, 443)
+    return connection
+
+
 def request_json(path: str, timeout: float = TIMEOUT_SECONDS) -> tuple[dict, dict]:
-    """Fixed host and GET paths, TLS verification, no redirects or credentials."""
+    """Fixed host and GET paths, verified TLS, system proxy, no redirects or credentials."""
     if path not in (STATUS_PATH, META_PATH):
         raise RadarError("invalid_endpoint")
-    connection = http.client.HTTPSConnection(HOST, timeout=timeout, context=ssl.create_default_context())
+    connection = None
     try:
+        connection = _https_connection(timeout)
         connection.request("GET", path, headers={
             "Accept": "application/json", "User-Agent": "CodexTokenHud-PublicResetRadar/1.0",
             "Accept-Encoding": "identity", "Connection": "close"})
@@ -127,7 +174,8 @@ def request_json(path: str, timeout: float = TIMEOUT_SECONDS) -> tuple[dict, dic
     except (OSError, http.client.HTTPException):
         raise RadarError("request_failed") from None
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def _empty(state="loading", reason=None) -> dict:
@@ -208,8 +256,6 @@ def _schedule(record, now_ms: float) -> tuple[dict | None, str | None]:
     start, end = _timestamp(window.get("startAt")), _timestamp(window.get("endAt"))
     if start is None or end is None or end < start:
         return None, "invalid_schedule"
-    if end <= now_ms:
-        return None, "schedule_elapsed_unconfirmed"
     declared = record.get("schedulePrecision")
     if declared == "date" and start < end:
         precision = "date"
@@ -224,16 +270,21 @@ def _schedule(record, now_ms: float) -> tuple[dict | None, str | None]:
     timing = record.get("scheduleTimingSource")
     timing = timing if timing in ("explicit", "fallback") else None
     constraint = "deadline" if record.get("scheduleConstraint") == "deadline" else None
-    # An inferred point or "by this time" deadline is not an exact reset promise.
-    if precision == "exact" and (basis != "explicit" or timing == "fallback" or constraint):
-        precision = "unknown"
+    # Keep the publisher's prediction visible, with its actual timing semantics.
+    if constraint == "deadline" and declared == "datetime":
+        precision = "deadline"
+    elif precision == "exact" and (basis != "explicit" or timing == "fallback"):
+        precision = "estimated"
+    elapsed = end <= now_ms
+    if elapsed and precision not in ("deadline", "estimated"):
+        return None, "schedule_elapsed_unconfirmed"
     confidence = _number(record.get("confidence"))
     if confidence is not None and not 0 <= confidence <= 1:
         confidence = None
     return {"id": record["id"], "kind": "reset_scheduled", "reset_type": record["resetType"],
             "start_ms": start, "end_ms": end, "precision": precision, "url": _url(record),
             "basis": basis, "confidence": confidence, "constraint": constraint,
-            "timing_source": timing, "scope": scope}, None
+            "timing_source": timing, "scope": scope}, "schedule_elapsed_unconfirmed" if elapsed else None
 
 
 def age_snapshot(snapshot: dict, now_ms: float | None = None) -> dict:
@@ -249,7 +300,9 @@ def age_snapshot(snapshot: dict, now_ms: float | None = None) -> dict:
         elif now_ms - source > SOURCE_MAX_AGE_SECONDS * 1000:
             result.update(state="stale", reason="source_stale", upcoming=None)
         elif result.get("upcoming") and result["upcoming"]["end_ms"] <= now_ms:
-            result.update(upcoming=None, reason="schedule_elapsed_unconfirmed")
+            result["reason"] = "schedule_elapsed_unconfirmed"
+            if result["upcoming"].get("precision") not in ("deadline", "estimated"):
+                result["upcoming"] = None
     if result["state"] != "ok":
         result["upcoming"] = None
     return result
