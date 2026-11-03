@@ -1,14 +1,15 @@
 # Windows 固定安装与启动入口
 
 推荐将完整便携包解压到 `%LOCALAPPDATA%\Programs\FOX-CODEX-HUD`，在该目录运行 `Install.ps1`。
-安装器会创建桌面 `FOX CODEX HUD` 快捷方式，并登记当前用户登录后的自启任务。
+安装器会在桌面和当前用户的开始菜单应用列表创建 `FOX CODEX HUD` 快捷方式，并登记登录后的自启任务。
+按 Windows 键搜索 `FOX CODEX HUD` 即可找到面板；关闭后也可通过该入口重新打开。
 快捷方式、后台等待器及其配置都使用该安装目录的绝对路径；工作目录也指向安装目录。
 Windows 常驻卡片使用 resident 模式，登录后即可显示。
 
 正式目录需要保留完整组件，包括 `CodexTokenHud.exe`、`metrics.py`、`history.py`、`app_follow.py`、
 网络与额度采集模块，以及 `python/` 运行时。只有 EXE 的备份目录不能提供完整监控功能。
 更新时先通过托盘退出面板，将完整新版解压覆盖到同一安装目录，再运行 `Install.ps1`。
-两个启动入口会继续使用该目录中的新版；用户数据保存在 `%USERPROFILE%\.codex-token-hud`。
+桌面、开始菜单和自启都会继续使用该目录中的新版；用户数据保存在 `%USERPROFILE%\.codex-token-hud`。
 
 如果面板出现“采集暂停”、两条线路显示“已过期”，可以在任务管理器中核对
 `CodexTokenHud.exe` 的实际路径。退出不完整的副本后，从正式目录运行 `Install.ps1`

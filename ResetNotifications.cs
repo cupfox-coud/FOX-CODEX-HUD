@@ -10,6 +10,7 @@ namespace CodexTokenHud
     internal sealed class ResetNotice
     {
         internal string Title, Message, Kind;
+        internal string ResetType = "unknown", EventId = "";
     }
 
     // Persistent event IDs suppress old announcements and repeated notifications after restart.
@@ -42,11 +43,11 @@ namespace CodexTokenHud
                 double? at = Json.Number(item, "at_ms");
                 if (baseline || !Recent(at, now, 21600000)) { Mark(key, now); continue; }
                 Mark(key, now);
-                string eventType = Json.Text(item, "reset_type");
-                string eventLabel = eventType == "banked" ? "储备重置次数发放" :
-                    eventType == "global_and_banked" ? "额度重置及储备次数发放" : "额度重置";
-                notice = new ResetNotice { Kind = "completed", Title = "检测到新的公共重置信号", Message =
-                    "Did Codex Reset 报告了新的" + eventLabel + "。个人到账以账户额度为准；HUD 正在重新同步。" };
+                string eventType = ResetRadarDisplay.NormalizeType(Json.Text(item, "reset_type"));
+                string eventLabel = ResetRadarDisplay.EventName(eventType);
+                notice = new ResetNotice { Kind = "completed", ResetType = eventType, EventId = id,
+                    Title = eventType == "banked" ? "重置卡已发放" : "检测到" + eventLabel + "记录", Message =
+                    "Did Codex Reset 报告了新的" + eventLabel + "。" + ResetRadarDisplay.EventGuidance(eventType) };
                 break;
             }
             if (baseline) Mark("baseline", now);
@@ -60,38 +61,46 @@ namespace CodexTokenHud
                 start.Value <= 0 || end.Value > 253402300799999d || end.Value < start.Value || end.Value <= now ||
                 ((precision == "exact" || precision == "estimated") && (start.Value != end.Value || start.Value < now)) ||
                 (precision != "exact" && precision != "estimated" && precision != "deadline" && precision != "date" && precision != "window")) return null;
-            double target = precision == "deadline" ? end.Value : start.Value;
-            string token = scheduleId + ":" + precision + ":" + start.Value.ToString("0", CultureInfo.InvariantCulture) +
+            string resetType = ResetRadarDisplay.NormalizeType(Json.Text(upcoming, "reset_type"));
+            string label = ResetRadarDisplay.EventName(resetType);
+            string verb = resetType == "banked" ? "发放" : ResetRadarDisplay.IsQuotaReset(resetType) ? "重置" : "事件";
+            double target = precision == "deadline" || precision == "date" ? end.Value : start.Value;
+            // Event semantics are part of identity: an unchanged date with a
+            // corrected type must replace the previous advice exactly once.
+            string token = scheduleId + ":" + resetType + ":" + precision + ":" + start.Value.ToString("0", CultureInfo.InvariantCulture) +
                 ":" + end.Value.ToString("0", CultureInfo.InvariantCulture);
             string keySchedule = "schedule:" + token, keySoon = "soon:" + token;
             double remaining = target - now;
             string absolute = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
                 .AddMilliseconds(target).ToLocalTime().ToString("MM月dd日 HH:mm", CultureInfo.InvariantCulture);
-            if (!Seen(keySchedule))
+            bool changed = Json.Text(Saved, "active-schedule-id") == scheduleId && Json.Text(Saved, "active-schedule") != token;
+            if (!Seen(keySchedule) || changed)
             {
-                bool changed = Json.Text(Saved, "active-schedule-id") == scheduleId && Json.Text(Saved, "active-schedule") != token;
                 Mark(keySchedule, now);
                 Saved["active-schedule-id"] = scheduleId;
                 Saved["active-schedule"] = token;
                 if (remaining <= 600000) Mark(keySoon, now);
                 string timing = precision == "deadline" ? "预计最晚 " + absolute + " 前，距预估截止约 " + Countdown(remaining) + "。" :
-                    precision == "estimated" ? "推测重置时间为 " + absolute + "，约 " + Countdown(remaining) + " 后。" :
+                    precision == "estimated" ? "推测" + verb + "时间为 " + absolute + "，约 " + Countdown(remaining) + " 后。" :
                     precision == "date" ? "公布了 " + new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
-                    .AddMilliseconds(start.Value).ToLocalTime().ToString("MM月dd日") + " 的重置预告，具体时刻未定。" :
+                    .AddMilliseconds(start.Value).ToLocalTime().ToString("MM月dd日") + " 的" + label + "预告，距预计窗口结束约 " + Countdown(remaining) +
+                    "；窗口截至 " + absolute + "，具体" + verb + "时刻未定。" :
                     remaining <= 0 ? "预计窗口已开始，具体到账时间待确认。" :
                     "距" + (precision == "exact" ? "计划时间" : "预计窗口开始") + "约 " + Countdown(remaining) + "。";
-                return new ResetNotice { Kind = changed ? "schedule_changed" : "forecast", Title = changed ? "重置预告已更新" : "发现新的重置排期", Message =
-                    "Did Codex Reset：" + timing + (Json.Text(upcoming, "reset_type") == "banked" ? "本次是储备重置次数发放。" : "") +
-                    "这是公共排期，个人额度以实际同步为准。" };
+                return new ResetNotice { Kind = changed ? "schedule_changed" : "forecast", ResetType = resetType, EventId = scheduleId,
+                    Title = changed ? label + "预告已更新" : "发现" + label + "预告", Message =
+                    "Did Codex Reset · " + label + "：" + timing + ResetRadarDisplay.EventGuidance(resetType) };
             }
             if (precision != "date" && remaining > 0 && remaining <= 600000 && !Seen(keySoon))
             {
                 Mark(keySoon, now);
-                return new ResetNotice { Kind = "soon", Title = precision == "deadline" ? "预估截止时间将近" : "重置排期即将开始", Message =
+                return new ResetNotice { Kind = "soon", ResetType = resetType, EventId = scheduleId,
+                    Title = label + (precision == "deadline" ? "预估截止将近" : "排期即将开始"), Message =
                     (precision == "deadline" ? "预计最晚 " + absolute + " 前，距预估截止约 " :
                         precision == "estimated" ? "距网站推测时间约 " :
                         "距公共" + (precision == "exact" ? "计划时间" : "预计窗口") + "约 ") +
-                    Countdown(remaining) + "。来源：Did Codex Reset；网站预估可能更新。" };
+                    Countdown(remaining) + "。事件：" + label + "。" + ResetRadarDisplay.EventGuidance(resetType) +
+                    "来源：Did Codex Reset；网站预估可能更新。" };
             }
             if (Saved.Count > 128)
                 foreach (string key in Saved.Where(p => p.Key != "baseline" && p.Key != "active-schedule" && p.Key != "active-schedule-id")
@@ -131,7 +140,7 @@ namespace CodexTokenHud
             nextResetNotice = DateTime.UtcNow.AddSeconds(20);
             tray.ShowBalloonTip(12000, notice.Title, notice.Message, ToolTipIcon.Info);
             lastResetNoticeTitle = notice.Title; lastResetNoticeKind = notice.Kind; lastResetNoticeAt = EpochMs();
-            if (notice.Kind == "completed") RequestRefresh();
+            if (notice.Kind == "completed" && ResetRadarDisplay.IsQuotaReset(notice.ResetType)) RequestRefresh();
         }
     }
 }

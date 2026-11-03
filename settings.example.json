@@ -1,5 +1,6 @@
 {
   "pythonw": "",
   "codex_home": "",
-  "corner_motion": "system"
+  "corner_motion": "system",
+  "corner_hover_fade": true
 }

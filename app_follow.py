@@ -149,7 +149,7 @@ class Lifecycle:
         self.dismissed = False
         self.closing = False
 
-    def step(self, targets, hud_running, owned, now, keep_open=False):
+    def step(self, targets, hud_running, owned, now, keep_open=False, crashed=False):
         if keep_open and not targets:
             targets = ["resident"]
         if targets:
@@ -157,7 +157,8 @@ class Lifecycle:
             if self.active_since is None:
                 self.active_since = now
             if self.observed_hud and not hud_running:
-                self.dismissed = not self.closing
+                # A known nonzero exit of our own child is a crash, not a tray exit.
+                self.dismissed = not self.closing and not crashed
                 self.closing = False
             self.observed_hud = hud_running
             if not hud_running and not self.dismissed and now - self.active_since >= self.settle:
@@ -174,6 +175,20 @@ class Lifecycle:
         if not hud_running:
             self.closing = False
         return None
+
+
+class RestartBackoff:
+    """Limit restart loops, then forgive failures after two stable minutes."""
+    def __init__(self):
+        self.failures = 0
+
+    def failure(self, now):
+        self.failures = min(self.failures + 1, 5)
+        return now + min(60, 5 * 2 ** (self.failures - 1))
+
+    def healthy(self, now, started):
+        if started is not None and now - started >= 120:
+            self.failures = 0
 
 
 class WatcherLock:
@@ -366,6 +381,7 @@ def watch(config, duration=0):
             atomic_json(config, {"enabled": False})
         return 0
     state, child, owner, error = Lifecycle(), None, "", ""
+    backoff, child_started, exit_handled = RestartBackoff(), None, False
     started, retry_at = time.monotonic(), 0
     runtime = Path(value.get("runtime", str(config.parent)))
     leases = Path(value.get("lease_root", str(config.parent / "launches")))
@@ -390,8 +406,17 @@ def watch(config, duration=0):
             targets = list(set(targets))
             status = read_selection(runtime / "status.json")
             external = bool(process_alive(status.get("pid")) and time.time() * 1000 - status.get("updated_at_ms", 0) < 5000)
-            running = (child is not None and child.poll() is None) or external
-            action = state.step(targets, running, child is not None, now, keep_open=value.get("resident", False))
+            exit_code = child.poll() if child is not None else None
+            running = (child is not None and exit_code is None) or external
+            crashed = child is not None and exit_code not in (None, 0) and not external
+            if child is not None and exit_code is None:
+                backoff.healthy(now, child_started)
+            if crashed and not exit_handled:
+                exit_handled = True
+                retry_at = max(retry_at, backoff.failure(now))
+                error = "hud_exit_" + str(exit_code)
+            action = state.step(targets, running, child is not None, now,
+                                keep_open=value.get("resident", False), crashed=crashed)
             if action == "start" and now >= retry_at:
                 owner = uuid.uuid4().hex
                 try:
@@ -400,6 +425,7 @@ def watch(config, duration=0):
                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                              **({"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}))
                     state.observed_hud = True
+                    child_started, exit_handled = now, False
                     error = ""
                 except OSError as failure:
                     child, error, retry_at = None, str(failure), now + 15

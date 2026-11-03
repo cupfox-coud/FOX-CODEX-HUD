@@ -19,7 +19,7 @@ class ResetRadarDisplayTests
     static void Upcoming(Dictionary<string, object> data, string precision, object start, object end)
     {
         Json.Object(data, "reset_radar")["upcoming"] = new Dictionary<string, object> {
-            {"id", "event-1"}, {"kind", "global"}, {"precision", precision}, {"start_ms", start}, {"end_ms", end} };
+            {"id", "event-1"}, {"kind", "reset_scheduled"}, {"reset_type", "global"}, {"precision", precision}, {"start_ms", start}, {"end_ms", end} };
     }
     static ResetRadarDisplay Read(Dictionary<string, object> data) { return ResetRadarDisplay.Read(data, Now); }
     static void Check(bool condition, string name)
@@ -66,8 +66,8 @@ class ResetRadarDisplayTests
         Check(Read(data).Countdown == "01:00:00" && Read(data).Detail == "距预计窗口开始", "future window counts to its beginning with a qualified label");
         Upcoming(data, "window", Now - 60000, Now + 60000);
         display = Read(data);
-        Check(display.State == "window" && display.Countdown == "窗口进行中" && display.Alert && display.UpcomingEndMs == Now + 60000,
-            "inside estimated window does not assert completed reset");
+        Check(display.State == "window" && display.Countdown == "01:00" && display.CountingDown && display.Alert && display.UpcomingEndMs == Now + 60000,
+            "an open estimated window counts to its end without asserting completed reset");
         Upcoming(data, "window", Now - 120000, Now);
         Check(Read(data).State == "expired" && !Read(data).Alert, "expired window does not remain active");
         Upcoming(data, "window", Now, null);
@@ -75,34 +75,47 @@ class ResetRadarDisplayTests
 
         Upcoming(data, "date", Now + 86400000, Now + 172800000);
         display = Read(data);
-        Check(display.State == "date" && display.Countdown.Contains("月") && display.Detail.Contains("时刻未定") && !display.Alert,
-            "date-only plan never invents a seconds countdown");
+        Check(display.State == "date" && display.Countdown == "2天 00:00:00" && display.CountingDown &&
+            display.CalendarLabel.StartsWith("窗口截至 ") && display.Detail.Contains("时刻未定") && !display.Alert,
+            "date window counts to its supplied upper bound with a visible estimate qualifier");
         Upcoming(data, "date", Now - 1000, Now + 86400000);
-        Check(Read(data).Countdown == "预计今日" && !Read(data).Alert, "same-day date plan does not trigger an exact-time alert");
+        Check(Read(data).Countdown == "1天 00:00:00" && !Read(data).Alert, "date window uses its end instead of its possibly past starting date");
+        Upcoming(data, "date", Now - 23 * 3600000, Now + 3600000);
+        display = Read(data);
+        var nextSecond = ResetRadarDisplay.Read(data, Now + 1000);
+        Check(display.Countdown == "01:00:00" && nextSecond.Countdown == "59:59",
+            "the live date-window regression decrements locally across an hour boundary");
+        Check(display.SignalKey == nextSecond.SignalKey && display.CalendarLabel == nextSecond.CalendarLabel,
+            "seconds ticking cannot create repeated signals or replace the calendar reference");
+        Check(ResetRadarDisplay.Read(data, Now + 3600000).State == "paused",
+            "an expired collector never keeps an old countdown running");
+        Upcoming(data, "date", Now + 86400000, null);
+        Check(Read(data).CalendarTime && !Read(data).CountingDown && Read(data).Detail.Contains("时刻未定"),
+            "a date without a supplied end never invents a cutoff");
         Upcoming(data, "unknown", Now + 60000, null);
-        Check(Read(data).State == "estimated" && Read(data).CalendarTime && Read(data).Countdown.StartsWith("预计 "),
-            "publisher timestamp with unspecified precision remains a visible estimate");
+        Check(Read(data).State == "estimated" && Read(data).CountingDown && Read(data).Countdown == "01:00" && Read(data).CalendarLabel.StartsWith("预计 "),
+            "publisher timestamp with unspecified precision becomes a qualified countdown");
 
         Upcoming(data, "deadline", Now - 60000, Now + 600000);
         display = Read(data);
         string cutoff = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(Now + 600000)
             .ToLocalTime().ToString("MM/dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
-        Check(display.State == "deadline" && display.CalendarTime && display.Countdown == "最晚 " + cutoff + " 前",
-            "deadline shows the API's actual upper-bound date and time");
-        Check(display.Title.Contains("预计") && display.Detail == "剩余 10:00" && display.Alert,
-            "deadline shows its estimate label and time remaining to the upper bound");
+        Check(display.State == "deadline" && display.CountingDown && display.Countdown == "10:00" && display.CalendarLabel == "最晚 " + cutoff + " 前",
+            "deadline leads with a countdown while retaining the API's upper-bound date");
+        Check(display.Title.Contains("预计") && display.Detail == "距预估截止" && display.Alert,
+            "deadline countdown keeps its estimate and target labels");
         Check(display.Hint.Contains("直接来自 API") && display.Hint.Contains("时区"),
             "deadline hint retains source and timezone attribution");
         Upcoming(data, "unknown", Now + 600000, Now + 600000);
         Json.Object(Json.Object(data, "reset_radar"), "upcoming")["constraint"] = "deadline";
-        Check(Read(data).Countdown == "最晚 " + cutoff + " 前", "older collectors' deadline constraint still displays the cutoff");
+        Check(Read(data).CalendarLabel == "最晚 " + cutoff + " 前" && Read(data).Countdown == "10:00", "older collectors' deadline constraint retains the cutoff and countdown");
         Upcoming(data, "estimated", Now + 600000, Now + 600000);
-        Check(Read(data).Countdown == "预计 " + cutoff && Read(data).CalendarTime,
-            "inferred point shows its supplied date without waiting for exact precision");
+        Check(Read(data).CalendarLabel == "预计 " + cutoff && Read(data).CountingDown && Read(data).Countdown == "10:00",
+            "inferred point counts to its supplied date without waiting for exact precision");
         Upcoming(data, "deadline", Now - 600000, Now - 600000);
         display = Read(data);
-        Check(display.State == "expired" && display.CalendarTime && display.Countdown.StartsWith("最晚 ") &&
-            display.Detail == "预估已过 · 等待更新" && !display.Alert && !display.UpcomingStartMs.HasValue,
+        Check(display.State == "expired" && !display.CountingDown && display.CalendarLabel.StartsWith("最晚 ") &&
+            display.Countdown == "预估已过" && display.Detail == "等待网站更新" && !display.Alert && !display.UpcomingStartMs.HasValue,
             "elapsed prediction retains the reference date while stopping its alert");
         Upcoming(data, "deadline", double.NaN, Now + 600000);
         Check(Read(data).State == "unknown" && !Read(data).CalendarTime, "invalid deadline cannot create an absolute-date label");
@@ -178,7 +191,7 @@ class ResetRadarDisplayTests
         Check(display.Title.Contains("公开记录") && display.Hint.Contains("实际重置时刻未提供") &&
             !display.Alert && !display.UpcomingStartMs.HasValue, "announcement time is qualified and is not an account confirmation or new countdown");
         completion["reset_type"] = "banked";
-        Check(Read(data).Countdown == "次数已发放", "banked credit distribution is not labeled a quota reset");
+        Check(Read(data).Countdown == "重置卡已发放", "banked credit distribution is not labeled a quota reset");
         completion["reset_type"] = "global_and_banked";
         Check(Read(data).Countdown == "已重置" && Read(data).Hint.Contains("同时包含"), "combined reset retains credit context");
         completion["time_basis"] = "completed";
@@ -212,7 +225,37 @@ class ResetRadarDisplayTests
         Check(Read(data).State == "completed", "real completion remains visible when backend clears an elapsed plan");
         radar["latest_events"] = new object[] {completion, new Dictionary<string, object> {
             {"id", "newer"}, {"kind", "reset_completed"}, {"reset_type", "banked"}, {"at_ms", Now - 1000}}};
-        Check(Read(data).Countdown == "次数已发放", "newest relevant event wins regardless of source list ordering");
+        Check(Read(data).Countdown == "重置卡已发放", "newest relevant event wins regardless of source list ordering");
+        foreach (string precision in new[] {"deadline", "estimated", "exact", "date", "window"})
+        {
+            data = Fixture();
+            Upcoming(data, precision, Now + 3600000, precision == "date" || precision == "window" ? Now + 7200000 : Now + 3600000);
+            var upcoming = Json.Object(Json.Object(data, "reset_radar"), "upcoming");
+            var global = Read(data);
+            upcoming["reset_type"] = "banked";
+            var cards = Read(data);
+            Check(cards.HasSignal && !cards.ResetsQuota && cards.EventHeading == "重置卡发放" && cards.EventBadge == "不自动重置额度",
+                precision + " card grant is explicitly labeled and cannot authorize quota encouragement");
+            Check(cards.Countdown == global.Countdown && cards.CalendarLabel == global.CalendarLabel && cards.SignalKey != global.SignalKey,
+                precision + " keeps API timing but distinguishes a changed event type");
+            upcoming["reset_type"] = "global_and_banked";
+            Check(Read(data).ResetsQuota && Read(data).EventHeading == "重置＋发卡", precision + " combined event explicitly retains both effects");
+            foreach (string unknown in new[] {"", "unknown", "future_type", "GLOBAL"})
+            {
+                upcoming["reset_type"] = unknown;
+                Check(!Read(data).ResetsQuota && Read(data).EventBadge == "事件类型未明" && Read(data).Hint.Contains("请勿据此提前清空"),
+                    precision + " does not infer a reset from an unsupported type " + unknown);
+            }
+            upcoming.Remove("reset_type"); upcoming["kind"] = "global";
+            Check(!Read(data).ResetsQuota, "missing type cannot be inferred from kind or timing precision");
+        }
+        data = Fixture(); Upcoming(data, "deadline", Now - 1000, Now - 1000);
+        Json.Object(data, "reset_radar")["latest_events"] = new object[] {new Dictionary<string, object> {
+            {"id", "card-after-global"}, {"kind", "reset_completed"}, {"reset_type", "banked"}, {"at_ms", Now - 500}}};
+        var superseding = Read(data);
+        Check(superseding.State == "completed" && !superseding.ResetsQuota && superseding.Hint.Contains("仅发放重置卡") &&
+            !superseding.Hint.Contains("事件类型：全局额度重置"),
+            "card completion replacing an expired global forecast discards the old forecast's advice");
         Console.WriteLine("Reset radar display checks passed: " + checks);
     }
 }

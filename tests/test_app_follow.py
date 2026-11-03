@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app_follow import (Lifecycle, WatcherLock, configure, desktop_exec, hud_command,
+from app_follow import (Lifecycle, RestartBackoff, WatcherLock, configure, desktop_exec, hud_command,
                         process_alive, process_kind, supported_processes, systemd_exec, watcher_command)
 from metrics import atomic_json, monitor
 from test_history import response, write_log
@@ -68,6 +68,58 @@ class FollowTests(unittest.TestCase):
         self.assertTrue(state.dismissed)
         self.assertIsNone(state.step([], False, True, 60, keep_open=True))
         self.assertIsNone(state.step([1], False, True, 90, keep_open=True))
+
+    def test_crash_is_not_mistaken_for_a_manual_exit(self):
+        state = Lifecycle()
+        state.step([], True, True, 0, keep_open=True)
+        self.assertEqual(state.step([], False, True, 2, keep_open=True, crashed=True), 'start')
+        self.assertFalse(state.dismissed)
+
+    def test_crash_restart_backoff_is_bounded_and_recovers_after_stable_run(self):
+        backoff = RestartBackoff()
+        self.assertEqual([backoff.failure(100) - 100 for _ in range(7)], [5, 10, 20, 40, 60, 60, 60])
+        backoff.healthy(219, 100)
+        self.assertEqual(backoff.failures, 5)
+        backoff.healthy(220, 100)
+        self.assertEqual(backoff.failure(300), 305)
+
+    def test_watcher_restarts_nonzero_child_but_respects_clean_exit(self):
+        import time
+        from app_follow import watch
+        class QuickBackoff(RestartBackoff):
+            def failure(self, now):
+                super().failure(now)
+                return now + 0.05
+        sleep, popen = time.sleep, subprocess.Popen
+        for exit_code, expected in ((7, 2), (0, 1)):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                marker = root / 'count.txt'
+                script = ('import pathlib,sys,time; p=pathlib.Path(%r); '
+                          'n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n)); '
+                          'sys.exit(%d) if n==1 else time.sleep(10)') % (str(marker), exit_code)
+                config = root / 'watcher/config.json'
+                atomic_json(config, {'enabled': True, 'resident': True, 'command': [sys.executable, '-c', script],
+                                    'runtime': str(root / 'runtime'), 'codex_home': str(root / 'empty')})
+                children = []
+                def launch(*args, **kwargs):
+                    process = popen(*args, **kwargs)
+                    children.append(process)
+                    return process
+                try:
+                    with patch('app_follow.supported_processes', return_value=[]), \
+                         patch('app_follow.Lifecycle', side_effect=lambda: Lifecycle(settle=0.01)), \
+                         patch('app_follow.RestartBackoff', side_effect=QuickBackoff), \
+                         patch('app_follow.time.sleep', side_effect=lambda seconds: sleep(0.05)), \
+                         patch('app_follow.subprocess.Popen', side_effect=launch):
+                        watch(config, duration=2)
+                    self.assertEqual(len(children), expected)
+                    self.assertEqual(int(marker.read_text()), expected)
+                finally:
+                    for child in children:
+                        if child.poll() is None:
+                            child.kill()
+                        child.wait()
 
     def test_short_version_probe_does_not_open_hud(self):
         state = Lifecycle()

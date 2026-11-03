@@ -11,19 +11,39 @@ namespace CodexTokenHud
         internal string Title = "重置雷达";
         internal string Countdown = "正在同步";
         internal string Detail = "等待公开排期";
+        internal string CalendarLabel = "";
         internal string Hint = "公开排期来自 Did Codex Reset；时间可能变化，不代表本账号已到账。";
         internal string State = "loading";
         internal bool Alert;
         internal bool CalendarTime;
+        internal bool CountingDown;
         internal string UpcomingId = "";
         internal double? UpcomingStartMs;
         internal double? UpcomingEndMs;
         internal string PredictionKind = "", CompletionEventId = "";
+        internal string ResetType = "unknown";
+        internal bool ResetsQuota { get { return IsQuotaReset(ResetType); } }
+        internal static string NormalizeType(string value)
+        { return value == "global" || value == "banked" || value == "global_and_banked" ? value : "unknown"; }
+        internal static bool IsQuotaReset(string value)
+        { return value == "global" || value == "global_and_banked"; }
+        internal static string EventName(string value)
+        { return value == "global" ? "全局额度重置" : value == "banked" ? "重置卡发放" :
+            value == "global_and_banked" ? "全局重置及发卡" : "类型未明的公共事件"; }
+        internal static string EventGuidance(string value)
+        { return value == "banked" ? "本次仅发放重置卡，不会自动重置周额度，无需提前清空额度；请查看重置卡到账情况。" :
+            IsQuotaReset(value) ? "个人到账以账户额度为准；公共记录不代表本账号已恢复。" :
+            "事件类型尚未明确，请勿据此提前清空额度。"; }
+        internal string EventHeading { get { return ResetType == "global_and_banked" ? "重置＋发卡" :
+            ResetType == "unknown" ? "重置雷达" : EventName(ResetType); } }
+        internal string EventBadge { get { return ResetType == "banked" ? "不自动重置额度" :
+            ResetsQuota ? "重置雷达 · " + (State == "completed" ? "公开记录" : "预告") :
+            HasSignal ? "事件类型未明" : ""; } }
         internal bool HasSignal { get { return State == "completed" || State == "deadline" ||
             State == "estimated" || State == "scheduled" || State == "window" || State == "date"; } }
         internal string SignalIdentity { get { return State == "completed" ? CompletionEventId : UpcomingId; } }
         internal string SignalKey { get { return !HasSignal ? "" : State == "completed" ?
-            "complete:" + CompletionEventId + ":" + Countdown : "schedule:" + UpcomingId + ":" + PredictionKind + ":" +
+            "complete:" + CompletionEventId + ":" + ResetType + ":" + Countdown : "schedule:" + UpcomingId + ":" + ResetType + ":" + PredictionKind + ":" +
             UpcomingStartMs.GetValueOrDefault().ToString("0", CultureInfo.InvariantCulture) + ":" +
             UpcomingEndMs.GetValueOrDefault().ToString("0", CultureInfo.InvariantCulture); } }
 
@@ -43,13 +63,16 @@ namespace CodexTokenHud
         private static bool Fresh(double? value, double nowMs, double maxAgeMs)
         { return Timestamp(value) && value.Value <= nowMs + 30000 && nowMs - value.Value <= maxAgeMs; }
 
-        private static string Duration(double durationMs)
+        private static string Duration(double durationMs, bool preciseDays = false)
         {
             // Inputs have already been bounded to valid Unix dates; clamp before casting.
             long seconds = (long)Math.Max(0, Math.Min(MaxEpochMs / 1000, Math.Ceiling(durationMs / 1000)));
             long days = seconds / 86400;
             if (days >= 100) return days.ToString(CultureInfo.InvariantCulture) + "天";
-            if (days > 0) return days.ToString(CultureInfo.InvariantCulture) + "天" + ((seconds % 86400) / 3600).ToString(CultureInfo.InvariantCulture) + "时";
+            if (days > 0) return preciseDays ? days.ToString(CultureInfo.InvariantCulture) + "天 " +
+                ((seconds % 86400) / 3600).ToString("00", CultureInfo.InvariantCulture) + ":" +
+                ((seconds % 3600) / 60).ToString("00", CultureInfo.InvariantCulture) + ":" + (seconds % 60).ToString("00", CultureInfo.InvariantCulture) :
+                days.ToString(CultureInfo.InvariantCulture) + "天" + ((seconds % 86400) / 3600).ToString(CultureInfo.InvariantCulture) + "时";
             if (seconds >= 3600) return (seconds / 3600).ToString("00", CultureInfo.InvariantCulture) + ":" +
                 ((seconds % 3600) / 60).ToString("00", CultureInfo.InvariantCulture) + ":" + (seconds % 60).ToString("00", CultureInfo.InvariantCulture);
             return (seconds / 60).ToString("00", CultureInfo.InvariantCulture) + ":" + (seconds % 60).ToString("00", CultureInfo.InvariantCulture);
@@ -57,6 +80,12 @@ namespace CodexTokenHud
 
         private static DateTime LocalDate(double timestamp)
         { return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(timestamp).ToLocalTime(); }
+
+        private static string Calendar(double timestamp, double nowMs)
+        {
+            DateTime date = LocalDate(timestamp);
+            return date.ToString(date.Year == LocalDate(nowMs).Year ? "MM/dd HH:mm" : "yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture);
+        }
 
         private static string OfficialWeekly(Dictionary<string, object> data, double nowMs)
         {
@@ -106,16 +135,21 @@ namespace CodexTokenHud
                 ((int)(age / 3600000)).ToString(CultureInfo.InvariantCulture) + "小时前";
             string basis = Json.Text(item, "time_basis") == "announced" ? "公告" : "完成";
             result.State = "completed";
+            result.ResetType = NormalizeType(Json.Text(item, "reset_type"));
             result.CompletionEventId = Json.Text(item, "id");
             result.Title = "重置雷达 · 公开记录";
-            result.Countdown = Json.Text(item, "reset_type") == "banked" ? "次数已发放" : "已重置";
+            result.Countdown = result.ResetType == "banked" ? "重置卡已发放" : "已重置";
             result.Detail = basis + " · " + ago;
             result.Alert = false;
+            result.CountingDown = result.CalendarTime = false;
+            result.CalendarLabel = "";
             result.UpcomingId = "";
             result.UpcomingStartMs = result.UpcomingEndMs = null;
-            result.Hint += " 网站已记录本次完成事件，最近 10 小时保留此提示；个人到账请查看左侧账户额度。" +
-                (basis == "公告" ? " 距今时间按公告发布时间计算，实际重置时刻未提供。" : "") +
-                (Json.Text(item, "reset_type") == "global_and_banked" ? " 同时包含储备重置次数发放。" : "");
+            // A completion can replace an elapsed forecast of a different type.
+            // Discard that forecast's guidance as well as its countdown.
+            result.Hint = "公开记录来自 Did Codex Reset。网站已记录本次" + EventName(result.ResetType) + "，最近 10 小时保留此提示。" + EventGuidance(result.ResetType) +
+                (basis == "公告" ? " 距今时间按公告发布时间计算，实际" + (result.ResetType == "banked" ? "发放" : "重置") + "时刻未提供。" : "") +
+                (result.ResetType == "global_and_banked" ? " 同时包含重置卡发放。" : "");
             return true;
         }
 
@@ -181,6 +215,8 @@ namespace CodexTokenHud
                 return result;
             }
 
+            result.ResetType = NormalizeType(Json.Text(upcoming, "reset_type"));
+            result.Hint += " 事件类型：" + EventName(result.ResetType) + "。" + EventGuidance(result.ResetType);
             string precision = Json.Text(upcoming, "precision");
             double? start = Number(upcoming, "start_ms");
             double? end = Number(upcoming, "end_ms");
@@ -205,12 +241,12 @@ namespace CodexTokenHud
                 bool elapsed = target <= nowMs;
                 if (elapsed && ShowRecentCompletion(result, radar, nowMs)) return result;
                 DateTime date = LocalDate(target);
-                string format = date.Year == LocalDate(nowMs).Year ? "MM/dd HH:mm" : "yyyy/MM/dd HH:mm";
                 result.Title = "重置雷达 · 预计";
                 result.State = elapsed ? "expired" : deadline ? "deadline" : "estimated";
-                result.CalendarTime = true;
-                result.Countdown = (deadline ? "最晚 " : "预计 ") + date.ToString(format, CultureInfo.InvariantCulture) + (deadline ? " 前" : "");
-                result.Detail = elapsed ? "预估已过 · 等待更新" : "剩余 " + Duration(target - nowMs);
+                result.CountingDown = !elapsed;
+                result.Countdown = elapsed ? "预估已过" : Duration(target - nowMs, true);
+                result.CalendarLabel = (deadline ? "最晚 " : "预计 ") + Calendar(target, nowMs) + (deadline ? " 前" : "");
+                result.Detail = elapsed ? "等待网站更新" : deadline ? "距预估截止" : "距预估时点";
                 result.Alert = !elapsed && target - nowMs <= 1800000;
                 if (!elapsed)
                 {
@@ -243,6 +279,20 @@ namespace CodexTokenHud
             if (precision == "date")
             {
                 result.State = "date";
+                if (end.HasValue && end.Value > start.Value)
+                {
+                    // The API's date window has a real upper bound even when no
+                    // precise reset instant is known. Count to that bound locally.
+                    result.Title = "重置雷达 · 预计窗口剩余";
+                    result.CountingDown = true;
+                    result.Countdown = Duration(end.Value - nowMs, true);
+                    result.CalendarLabel = "窗口截至 " + Calendar(end.Value, nowMs);
+                    result.Detail = result.ResetType == "banked" ? "具体发放时刻未定" : "具体事件时刻未定";
+                    result.Hint += " 倒计时至 API 日期窗口的结束时间 " + Calendar(end.Value, nowMs) +
+                        "，不是精确事件时刻；网站更新窗口后随之调整。";
+                    return result;
+                }
+                result.CalendarTime = true;
                 result.Countdown = LocalDate(nowMs).Date == LocalDate(start.Value).Date ? "预计今日" : LocalDate(start.Value).ToString("MM月dd日", CultureInfo.InvariantCulture);
                 result.Detail = "日期预告 · 时刻未定";
                 result.Hint += " 此预告只有日期，不提供精确到账倒计时。";
@@ -251,8 +301,12 @@ namespace CodexTokenHud
 
             bool windowOpen = precision == "window" && nowMs >= start.Value;
             result.State = windowOpen ? "window" : "scheduled";
-            result.Countdown = windowOpen ? "窗口进行中" : Duration(start.Value - nowMs);
-            result.Detail = windowOpen ? "预计窗口 · 等待确认" : precision == "window" ? "距预计窗口开始" : "距计划时间 · 非到账";
+            result.CountingDown = true;
+            result.Countdown = Duration((windowOpen ? end.Value : start.Value) - nowMs, true);
+            result.CalendarLabel = (windowOpen ? "窗口截至 " : precision == "window" ? "窗口开始 " : "计划 ") +
+                Calendar(windowOpen ? end.Value : start.Value, nowMs);
+            result.Title = windowOpen ? "重置雷达 · 预计窗口剩余" : precision == "window" ? "重置雷达 · 预计窗口开始" : "重置雷达 · 计划倒计时";
+            result.Detail = windowOpen ? "窗口已开始 · 等待确认" : precision == "window" ? "距预计窗口开始" : "距计划时间 · 非到账";
             result.Alert = windowOpen || start.Value - nowMs <= 1800000;
             result.Hint += " " + (precision == "window" ? "这是预计时间范围，不是精确到账时刻。" : "这是公开计划时间，不是本账号额度已重置的确认。");
             return result;

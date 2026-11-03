@@ -169,6 +169,15 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["reset_type"], "global_and_banked")
 
+    def test_schedule_retains_event_effect_without_inferring_from_time(self):
+        for event_type in ("global", "banked", "global_and_banked"):
+            with self.subTest(event_type=event_type):
+                result = self.normalize(scheduled(resetType=event_type))
+                self.assertEqual(result["upcoming"]["reset_type"], event_type)
+        for event_type in (None, "unknown", "future_type", "GLOBAL"):
+            with self.subTest(event_type=event_type):
+                self.assertIsNone(self.normalize(scheduled(resetType=event_type))["upcoming"])
+
     def test_completion_time_basis_and_invalid_timestamps(self):
         record = completed(completedAt=iso(NOW - 2000), effectiveAt=iso(NOW - 3000))
         event = self.normalize(latestGlobal=record)["latest_events"][0]

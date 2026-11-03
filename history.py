@@ -65,9 +65,12 @@ class SessionCatalog:
                 continue
         if recorded is None:
             at = max(at, stat.st_mtime * 1000)  # Discovery only; never used as sample timing.
+        source = meta.get("source")
+        is_subagent = (isinstance(source, dict) and "subagent" in source) or source == "subagent"
         return {"path": str(path), "id": meta.get("id") if isinstance(meta.get("id"), str) else None, "signature": signature,
                 "updated_at_ms": at, "created_at_ms": timestamp_ms(meta.get("timestamp")) or 0,
-                "model": meta.get("model"), "cwd": meta.get("cwd") if isinstance(meta.get("cwd"), str) else "", "size": stat.st_size}
+                "model": meta.get("model"), "is_subagent": is_subagent,
+                "cwd": meta.get("cwd") if isinstance(meta.get("cwd"), str) else "", "size": stat.st_size}
 
     def refresh(self, force=False) -> None:
         if not force and time.monotonic() - self.updated < 2:
@@ -107,6 +110,7 @@ class SessionCatalog:
             row = dict(self.repository.rows.get(thread_id) or {})
             row.update(id=thread_id, title=row.get("title") or titles.get(thread_id) or Path(latest["cwd"]).name or thread_id,
                        model=row.get("model") or latest["model"], rollout_path=latest["path"],
+                       is_subagent=latest.get("is_subagent", False),
                        updated_at_ms=latest["updated_at_ms"], segment_count=len(segments))
             rows[thread_id] = row
         self.rows = dict(sorted(rows.items(), key=lambda pair: pair[1]["updated_at_ms"], reverse=True))

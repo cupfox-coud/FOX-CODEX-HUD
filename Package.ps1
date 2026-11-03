@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([switch]$SkipTests, [switch]$SkipSmokeTest, [string]$PythonExecutable = 'python.exe',
     [ValidateSet('x64', 'arm64', 'x86')][string]$Architecture = 'x64')
 $ErrorActionPreference = 'Stop'
@@ -17,7 +17,7 @@ New-Item -ItemType Directory -Path $taskStage -Force | Out-Null
 & (Join-Path $taskRoot 'Build.ps1') -OutputDirectory $taskStage
 Remove-Item -LiteralPath (Join-Path $taskStage 'AssemblyInfo.g.cs')
 # Explicit allowlist: no account data, debug extracts, local settings, or conversation logs.
-$taskFiles = @('metrics.py', 'quota.py', 'latency.py', 'reset_radar.py', 'history.py', 'dashboard.py', 'stats.py', 'app_follow.py', 'StartDashboard.ps1', 'start-dashboard.sh', 'VERSION', 'README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
+$taskFiles = @('metrics.py', 'speed.py', 'quota.py', 'quota_forecast.py', 'latency.py', 'reset_radar.py', 'history.py', 'dashboard.py', 'stats.py', 'app_follow.py', 'StartDashboard.ps1', 'start-dashboard.sh', 'VERSION', 'README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
     'CHANGELOG.md', 'PRIVACY.md', 'SECURITY.md', 'CONTRIBUTING.md', 'settings.example.json',
     'Install.ps1', 'Uninstall.ps1', 'Start.ps1', 'Stop.ps1')
 foreach ($taskFile in $taskFiles) { Copy-Item -LiteralPath (Join-Path $taskRoot $taskFile) -Destination $taskStage }
@@ -28,6 +28,7 @@ foreach ($taskScript in Get-ChildItem -LiteralPath $taskStage -Filter '*.ps1' -F
 }
 Copy-Item -LiteralPath (Join-Path $taskRoot 'docs') -Destination $taskStage -Recurse
 Copy-Item -LiteralPath (Join-Path $taskRoot 'web') -Destination $taskStage -Recurse
+Copy-Item -LiteralPath (Join-Path $taskRoot 'licenses') -Destination $taskStage -Recurse
 $taskRuntimeFile = if ($Architecture -eq 'x64') { 'python-runtime.json' } else { "python-runtime-$Architecture.json" }
 $taskRuntimeInfo = Get-Content -LiteralPath (Join-Path $taskRoot $taskRuntimeFile) -Raw | ConvertFrom-Json
 $taskCache = Join-Path $taskRoot 'build\cache'

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$PythonExecutable = 'python.exe')
 $ErrorActionPreference = 'Stop'
 $taskRoot = $PSScriptRoot
@@ -18,12 +18,14 @@ try {
         "/out:$taskTestExe", '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll',
         '/r:System.Web.Extensions.dll', '/r:Microsoft.CSharp.dll',
         "/r:$taskWpf\UIAutomationClient.dll", "/r:$taskWpf\UIAutomationTypes.dll", "/r:$taskWpf\WindowsBase.dll",
-        "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", "$taskRoot\ActivityDisplay.cs", "$taskRoot\CornerDisplay.cs", "$taskRoot\ResetRadarDisplay.cs", "$taskRoot\ResetNotifications.cs", "$taskRoot\tests\PresentationTests.cs")
+        "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", "$taskRoot\ActivityDisplay.cs", "$taskRoot\CornerDisplay.cs", "$taskRoot\SpeedDisplay.cs", "$taskRoot\SpeedInstrument.cs", "$taskRoot\ResetRadarDisplay.cs", "$taskRoot\ResetNotifications.cs", "$taskRoot\tests\PresentationTests.cs")
     & $taskCsc @taskArgs
     if ($LASTEXITCODE -ne 0) { throw 'Presentation test compilation failed.' }
     & $taskTestExe
     if ($LASTEXITCODE -ne 0) { throw 'Presentation tests failed.' }
     & (Join-Path $taskRoot 'TestHudBinding.ps1') -PythonExecutable $PythonExecutable
+    & (Join-Path $taskRoot 'TestZOrder.ps1') -PythonExecutable $PythonExecutable
+    & (Join-Path $taskRoot 'TestHover.ps1') -PythonExecutable $PythonExecutable
     & (Join-Path $taskRoot 'TestCorner.ps1') -PythonExecutable $PythonExecutable
     Write-Output 'All tests passed.'
 } finally { Pop-Location }

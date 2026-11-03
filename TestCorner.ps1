@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$PythonExecutable, [switch]$RenderOnly)
 $ErrorActionPreference = 'Stop'
 $taskRoot = $PSScriptRoot
@@ -7,10 +7,10 @@ New-Item -ItemType Directory -Path $taskOutput -Force | Out-Null
 $taskCsc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $taskWpf = Join-Path (Split-Path -Parent $taskCsc) 'WPF'
 $taskExe = Join-Path $taskOutput 'CornerHudTests.exe'
-$taskArgs = @('/nologo', '/target:exe', '/platform:anycpu', '/main:CornerHudTests',
+$taskArgs = @('/nologo', '/target:exe', '/platform:anycpu', '/define:HUD_TEST', '/main:CornerHudTests',
     "/out:$taskExe", '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll', '/r:Microsoft.CSharp.dll',
     "/r:$taskWpf\UIAutomationClient.dll", "/r:$taskWpf\UIAutomationTypes.dll", "/r:$taskWpf\WindowsBase.dll",
-    "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", "$taskRoot\ActivityDisplay.cs", "$taskRoot\CornerDisplay.cs", "$taskRoot\ResetRadarDisplay.cs", "$taskRoot\ResetNotifications.cs", "$taskRoot\tests\CornerHudTests.cs")
+    "$taskRoot\CodexTokenHud.cs", "$taskRoot\RuntimeConfiguration.cs", "$taskRoot\ActivityDisplay.cs", "$taskRoot\CornerDisplay.cs", "$taskRoot\SpeedDisplay.cs", "$taskRoot\SpeedInstrument.cs", "$taskRoot\ResetRadarDisplay.cs", "$taskRoot\ResetNotifications.cs", "$taskRoot\tests\CornerHudTests.cs")
 & $taskCsc @taskArgs
 if ($LASTEXITCODE -ne 0) { throw 'Corner tests failed to compile.' }
 if ($RenderOnly) { & $taskExe $taskRoot $PythonExecutable '--render-only' }
@@ -27,7 +27,7 @@ $taskActivityArgs = $taskArgs | ForEach-Object {
 if ($LASTEXITCODE -ne 0) { throw 'Activity tests failed to compile.' }
 & $taskActivityExe
 if ($LASTEXITCODE -ne 0) { throw 'Activity verification failed.' }
-foreach ($taskTestName in @('ResetRadarDisplayTests', 'ResetNotificationTests')) {
+foreach ($taskTestName in @('ResetRadarDisplayTests', 'ResetNotificationTests', 'SpeedDisplayTests')) {
     $taskResetExe = Join-Path $taskOutput ($taskTestName + '.exe')
     $taskResetArgs = $taskArgs | ForEach-Object {
         if ($_ -eq '/main:CornerHudTests') { '/main:' + $taskTestName }

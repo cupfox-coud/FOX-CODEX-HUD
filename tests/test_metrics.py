@@ -10,7 +10,7 @@ import subprocess
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from metrics import Measurements, SessionTail, TailCache, ThreadRepository, cache_percent, monitor, reverse_small_lines
+from metrics import ActivitySelector, Measurements, SessionTail, TailCache, ThreadRepository, cache_percent, monitor, reverse_small_lines
 
 
 def event(seconds, kind, payload):
@@ -258,9 +258,11 @@ class MeasurementsTest(unittest.TestCase):
             self.assertEqual(m.stage, "idle")
             self.assertFalse(m.turn_active)
             self.assertFalse(m.pending_calls)
-        # Late final token statistics are still useful, and retain the item timing.
+        # Late usage retains counts and the diagnostic stream timing, but cannot
+        # reconstruct an end-to-end request after its boundary was closed.
         m.feed(event(11, "token_usage_record", {"response_id": "final", "usage": usage(100)}))
-        self.assertEqual(m.last["rate"], 10)
+        self.assertIsNone(m.last["rate"])
+        self.assertEqual(m.last["stream_duration_ms"], 10000)
         self.assertEqual(m.output_total, 100)
         self.assertFalse(m.turn_active)
         self.assertEqual(m.stage, "idle")
@@ -289,20 +291,21 @@ class MeasurementsTest(unittest.TestCase):
         self.assertEqual(snapshot["last"]["measured_at_ms"], 1700000005000)
         self.assertTrue(snapshot["turn_active"])
 
-    def test_model_stream_timing_excludes_prefill_and_tools(self):
+    def test_request_timing_includes_prefill_and_excludes_tools(self):
         m = Measurements("example-model")
         m.feed(event(0, "event_msg", {"type": "task_started", "turn_id": "t"}))
         m.feed(event(5, "event_msg", {"type": "item_completed", "item": {"type": "Reasoning"},
                 "started_at_ms": 1700000002000, "completed_at_ms": 1700000005000}))
         m.feed(event(6, "response_item", {"type": "custom_tool_call", "call_id": "c"}))
         m.feed(event(7, "token_usage_record", {"response_id": "r", "usage": usage(100)}))
-        self.assertEqual(m.last["rate"], 20)
-        self.assertEqual(m.last["basis"], "stream")
+        self.assertAlmostEqual(m.last["rate"], 100 / 7)
+        self.assertEqual(m.last["basis"], "request")
+        self.assertEqual(m.last["stream_duration_ms"], 5000)
         m.feed(event(107, "response_item", {"type": "custom_tool_call_output", "call_id": "c"}))
         m.feed(event(110, "event_msg", {"type": "item_completed", "item": {"type": "AgentMessage"},
                 "started_at_ms": 1700000108000, "completed_at_ms": 1700000110000}))
         m.feed(event(112, "token_usage_record", {"response_id": "r2", "usage": usage(80)}))
-        self.assertEqual(m.last["rate"], 20)
+        self.assertEqual(m.last["rate"], 16)
         self.assertEqual(m.output_total, 180)
         self.assertEqual(m.last["cache_percent"], 75)
 
@@ -578,7 +581,7 @@ class MeasurementsTest(unittest.TestCase):
 
 
 class ActivityBindingIntegrationTest(unittest.TestCase):
-    def collect(self, rows, mode="activity", selected_id=None, title=""):
+    def collect(self, rows, mode="activity", selected_id=None, title="", updates=None, sources=None):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             runtime = root / "runtime"
@@ -591,8 +594,13 @@ class ActivityBindingIntegrationTest(unittest.TestCase):
                     log = root / (thread_id + ".jsonl")
                     # Real internal session metadata may omit model; the catalog
                     # obtains the confirmed model from its read-only database.
-                    records = [event(0, "session_meta", {"id": thread_id}),
+                    metadata = {"id": thread_id}
+                    if sources and thread_id in sources:
+                        metadata["source"] = sources[thread_id]
+                    records = [event(0, "session_meta", metadata),
                                event(seconds, "event_msg", {"type": "task_started"})]
+                    if updates and thread_id in updates:
+                        records.append(event(updates[thread_id], "event_msg", {"type": "item_completed", "item": {"type": "tool"}}))
                     log.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
                     connection.execute("INSERT INTO threads VALUES (?,?,?,?,?)",
                                        (thread_id, thread_title, str(log), model, seconds))
@@ -647,6 +655,68 @@ class ActivityBindingIntegrationTest(unittest.TestCase):
         self.assertEqual(result["binding"], "ambiguous")
         self.assertIsNone(result["thread_id"])
         self.assertEqual({row["id"] for row in result["matches"]}, {"one", "two"})
+
+    def test_background_writes_do_not_steal_a_more_recently_started_task(self):
+        rows = [("background", "Background", "gpt-6-astra", 10),
+                ("current", "Current", "gpt-6.1-sol", 20)]
+        result = self.collect(rows, updates={"background": 100, "current": 21})
+        self.assertEqual(result["thread_id"], "current")
+        self.assertEqual(result["metrics"]["turn_started_at_ms"], 1700000020000)
+
+    def test_newer_user_task_can_still_change_the_followed_conversation(self):
+        rows = [("old", "Old", "gpt-6-astra", 10), ("new", "New", "gpt-6.1-sol", 30)]
+        result = self.collect(rows, updates={"old": 100, "new": 31})
+        self.assertEqual(result["thread_id"], "new")
+
+    def test_automatic_follow_excludes_newer_subagent_but_manual_binding_can_select_it(self):
+        rows = [("user", "User", "gpt-6-astra", 10), ("child", "Child", "gpt-6.1-sol", 20)]
+        sources = {"child": {"subagent": {"thread_spawn": {}}}}
+        self.assertEqual(self.collect(rows, sources=sources)["thread_id"], "user")
+        manual = self.collect(rows, mode="manual", selected_id="child", title="Child", sources=sources)
+        self.assertEqual(manual["thread_id"], "child")
+
+    def test_repeated_background_updates_do_not_switch_until_a_new_task_starts(self):
+        class Tail:
+            def __init__(self, start):
+                self.measurements = type("Sample", (), {"turn_started_at": start})()
+        class Tails:
+            def __init__(self):
+                self.items = {"older": Tail(100), "current": Tail(200)}
+            def update(self, row):
+                return self.items[row["id"]]
+        tails = Tails()
+        selector = ActivitySelector()
+        old = {"id": "older", "updated_at_ms": 400, "model": "m"}
+        current = {"id": "current", "updated_at_ms": 300, "model": "m"}
+        for i in range(20):
+            old["updated_at_ms"] += 100
+            self.assertEqual(selector.choose([old, current], tails, 100000)[0]["id"], "current")
+        tails.items["older"].measurements.turn_started_at = 300
+        self.assertEqual(selector.choose([old, current], tails, 100000)[0]["id"], "older")
+
+    def test_selected_task_survives_many_newer_background_writes(self):
+        class Tails:
+            def update(self, row):
+                sample = type("Sample", (), {"turn_started_at": row["start"]})()
+                return type("Tail", (), {"measurements": sample})()
+        current = {"id": "current", "updated_at_ms": 200, "start": 200, "model": "m"}
+        selector = ActivitySelector()
+        self.assertEqual(selector.choose([current], Tails(), 100000)[0]["id"], "current")
+        background = [{"id": str(i), "updated_at_ms": 1000+i, "start": 100, "model": "m"}
+                      for i in range(10)]
+        self.assertEqual(selector.choose(background+[current], Tails(), 100000)[0]["id"], "current")
+
+    def test_equal_start_times_do_not_toggle_as_background_updates_alternate(self):
+        class Tails:
+            def update(self, row):
+                sample = type("Sample", (), {"turn_started_at": 100})()
+                return type("Tail", (), {"measurements": sample})()
+        one = {"id": "one", "updated_at_ms": 200, "model": "m"}
+        two = {"id": "two", "updated_at_ms": 100, "model": "m"}
+        selector = ActivitySelector()
+        self.assertEqual(selector.choose([one, two], Tails(), 100000)[0]["id"], "one")
+        two["updated_at_ms"] = 300
+        self.assertEqual(selector.choose([two, one], Tails(), 100000)[0]["id"], "one")
 
 
 class NetworkCollectorIntegrationTest(unittest.TestCase):

@@ -2,6 +2,15 @@
 
 The project's C# and Python source is licensed under MIT; see LICENSE.
 
+The live throughput model and instrument design are informed by
+[zoefix/agent-speed](https://github.com/zoefix/agent-speed), revision
+`a94a67fcc78e5d8eea5f82d8d5e737bccf994e2c` (2026-10-26).
+`SpeedInstrument.cs` adapts the analytic critically damped spring from that
+project's `windows/src/AgentSpeed.Presentation/Motion/Springs.cs`.
+Copyright (c) 2026 zoefix, MIT License; the full notice is preserved in
+[licenses/agent-speed-MIT.txt](licenses/agent-speed-MIT.txt) and shipped in releases.
+See [docs/SPEED.md](docs/SPEED.md) for the calculation rules and integration scope.
+
 Portable releases include the unmodified official Windows x64 CPython 3.14.8 embeddable distribution. It is governed by the Python Software Foundation license and the historical/component licenses supplied in that archive. The full archive contents, including `python/LICENSE.txt`, are preserved. Python is not relicensed under this project's MIT license.
 
 Official download and checksum source: [Python 3.14.8 release](https://www.python.org/downloads/release/python-3148/).

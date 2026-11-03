@@ -18,6 +18,8 @@ from typing import Any
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from speed import LiveSpeed, interval as speed_interval
+
 
 def timestamp_ms(value: str | None) -> float | None:
     if not isinstance(value, str) or not value:
@@ -30,7 +32,7 @@ def timestamp_ms(value: str | None) -> float | None:
 
 def integer(value: Any) -> int:
     try:
-        return max(0, int(value))
+        return max(0, min(10**12, int(value)))
     except (TypeError, ValueError, OverflowError):
         return 0
 
@@ -74,6 +76,10 @@ class Measurements:
         self.event_at: float = 0
         self.turn_started_at: float | None = None
         self.response_durations: collections.deque[dict] = collections.deque(maxlen=20)
+        self.speed_samples: collections.deque[dict] = collections.deque(maxlen=256)
+        self.live_speed = LiveSpeed()
+        self.file_created_at = None
+        self.agent_path = "/root"
         # A separate replay can retain response timing across a truncated tail,
         # without adding historical usage to the live token counters.
         self.response_history: Measurements | None = None
@@ -89,6 +95,13 @@ class Measurements:
         if at is not None:
             self.event_at = max(self.event_at, at)
         event_type = p.get("type")
+        if kind == "session_meta":
+            if self.file_created_at is None:
+                self.file_created_at = at
+                self.agent_path = p.get("agent_path") or "/root"
+            return
+        if self.file_created_at is not None and at is not None and at < self.file_created_at - 2000:
+            return  # Copied pre-fork history cannot become fresh speed or activity.
 
         if kind == "turn_context":
             self.model = p.get("model") or self.model
@@ -114,6 +127,13 @@ class Measurements:
             self.turn_active = False
             self.stage = "idle"
             self.pending_calls.clear()
+            self.request_boundary = None
+            return
+
+        if kind == "event_msg" and event_type == "user_message":
+            if self.model_start is None and self.turn_active is not False:
+                self.request_boundary = at
+                self.stage = "generating"
             return
 
         if kind == "event_msg" and event_type == "item_completed":
@@ -142,8 +162,17 @@ class Measurements:
                 if not self.pending_calls and self.turn_active is not False:
                     self.request_boundary = at
                     self.stage = "generating"
-            elif event_type == "message" and p.get("role") == "user":
-                self.request_boundary = at
+            elif event_type == "message" and p.get("role") in ("user", "developer", "system"):
+                if self.model_start is None and self.turn_active is not False:
+                    self.request_boundary = at
+                    self.stage = "generating"
+            elif event_type == "agent_message" and p.get("recipient") == self.agent_path:
+                if self.model_start is None:
+                    self.request_boundary = at
+            elif event_type == "reasoning" or (event_type == "message" and p.get("role") == "assistant"):
+                if self.turn_active is not False:
+                    self.model_start = self.model_start or at
+                    self.stage = "generating"
             return
 
         if kind == "token_usage_record":
@@ -154,7 +183,7 @@ class Measurements:
                 self.recent_response_ids.append(response_id)
             usage = p.get("usage")
             if isinstance(usage, dict):
-                self._sample(usage, at, "response", p.get("thread_token_usage"), p.get("turn_token_usage"))
+                self._sample(usage, at, "response", p.get("thread_token_usage"), p.get("turn_token_usage"), response_id)
                 self.expected_legacy = self._fingerprint(usage)
             return
 
@@ -184,24 +213,29 @@ class Measurements:
             "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"))
 
     def _sample(self, usage: dict, at: float | None, source: str,
-                total: dict | None, turn: dict | None) -> None:
+                total: dict | None, turn: dict | None, response_id: str | None = None) -> None:
         if at is None:
             return
         output = integer(usage.get("output_tokens"))
-        basis = "stream" if self.model_start is not None else "request"
-        start = self.model_start if self.model_start is not None else self.request_boundary
-        duration = at - start if start is not None else None
-        # Response latency includes waiting for model output, but begins again
-        # after tool results. It is not the duration of the whole user task.
-        response_start = self.request_boundary if self.request_boundary is not None else self.model_start
+        stream_duration = at - self.model_start if self.model_start is not None else None
+        response_start = self.request_boundary
         response_ms = at - response_start if response_start is not None else None
+        valid = speed_interval(response_start, at)
+        duration = valid[1] - valid[0] if valid else None
+        basis = "request" if valid else "unmeasured"
         if self.turn_active is not False and output and response_ms is not None and math.isfinite(response_ms) and response_ms > 0:
             self.response_durations.append({"duration_ms": response_ms, "completed_at_ms": at})
-        # Old history may start halfway through a response. Preserve usage without inventing speed.
-        rate = output * 1000 / duration if duration is not None and duration >= 50 and output else None
+        rate = output * 1000 / duration if duration is not None and output else None
+        if valid and output:
+            self.speed_samples.append({
+                "id": response_id or str(at) + ":" + str(self._fingerprint(usage)),
+                "start_ms": valid[0], "end_ms": valid[1], "output_tokens": output,
+                "input_tokens": integer(usage.get("input_tokens")),
+                "cached_input_tokens": integer(usage.get("cached_input_tokens")),
+                "cache_valid": cache_percent(usage) is not None, "model": self.model})
         self.last = {
             "rate": rate, "duration_ms": duration if duration is not None and duration > 0 else None,
-            "basis": basis, "input_tokens": integer(usage.get("input_tokens")),
+            "basis": basis, "stream_duration_ms": stream_duration, "request_start_ms": response_start, "input_tokens": integer(usage.get("input_tokens")),
             "cached_input_tokens": integer(usage.get("cached_input_tokens")),
             "output_tokens": output, "reasoning_output_tokens": integer(usage.get("reasoning_output_tokens")),
             "cache_percent": cache_percent(usage), "measured_at_ms": at, "model": self.model,
@@ -223,10 +257,13 @@ class Measurements:
         self.last_usage_at = at
         self.model_start = None
         self.request_boundary = at
+        if self.turn_active is not False:
+            self.stage = "tools"
 
-    def snapshot(self) -> dict:
+    def snapshot(self, now_ms=None) -> dict:
         durations = self.response_history.response_durations if self.response_history is not None else self.response_durations
         return {"model": self.model, "stage": self.stage, "last": self.last,
+                "live_speed": self.live_speed.compute(self, time.time() * 1000 if now_ms is None else now_ms),
                 "response_duration": {
                     "mean_ms": sum(row["duration_ms"] for row in durations) / len(durations) if durations else None,
                     "count": len(durations), "limit": 20,
@@ -342,7 +379,9 @@ class SessionTail:
         usage_rows = 0
         history = None
         def replay():
-            result = Measurements()
+            result = Measurements(self.measurements.model)
+            result.file_created_at = self.measurements.file_created_at
+            result.agent_path = self.measurements.agent_path
             for row in reversed(records):
                 if row is None:
                     # An oversized row may be a tool result or user message.
@@ -367,7 +406,7 @@ class SessionTail:
             if not isinstance(record, dict):
                 continue
             kind, payload = record.get("type"), record.get("payload")
-            if kind not in ("event_msg", "response_item", "token_usage_record") or not isinstance(payload, dict):
+            if kind not in ("event_msg", "response_item", "token_usage_record", "turn_context") or not isinstance(payload, dict):
                 continue
             event_type = payload.get("type")
             if kind == "event_msg" and event_type not in (
@@ -379,7 +418,7 @@ class SessionTail:
                 continue
             # Retain timing metadata, never message bodies or tool output.
             slim = {k: payload[k] for k in ("type", "turn_id", "call_id", "role", "response_id", "usage",
-                    "thread_token_usage", "turn_token_usage", "info", "started_at_ms") if k in payload}
+                    "thread_token_usage", "turn_token_usage", "info", "started_at_ms", "model") if k in payload}
             if isinstance(payload.get("item"), dict):
                 slim["item"] = {"type": payload["item"].get("type")}
             records.append({"type": kind, "timestamp": record.get("timestamp"), "payload": slim})
@@ -422,6 +461,15 @@ class SessionTail:
                     if f.read(len(self.anchor)) != self.anchor:
                         self.reset()  # Same file was rewritten and grew before the next poll.
                 if not self.initialized:
+                    # Forks can prepend copied records whose timestamps predate this
+                    # file's creation. Recover that guard even when starting at its tail.
+                    f.seek(0)
+                    try:
+                        metadata = json.loads(f.readline(256 * 1024))
+                        if isinstance(metadata, dict) and metadata.get("type") == "session_meta":
+                            self.measurements.feed(metadata)
+                    except (ValueError, UnicodeDecodeError):
+                        pass
                     self.offset = max(0, size - self.history_bytes)
                     f.seek(self.offset)
                     if self.offset:
@@ -479,6 +527,40 @@ class TailCache:
         while len(self.tails) > self.maximum:
             self.tails.popitem(last=False)
         return tail
+
+
+class ActivitySelector:
+    """Follow the newest started user task, not competing background writes."""
+    def __init__(self):
+        self.selected_id = None
+
+    def choose(self, rows, tails, now_ms):
+        eligible = [r for r in rows if r.get("model") != "codex-auto-review" and not r.get("is_subagent")]
+        candidates = eligible[:8]
+        previous = next((r for r in eligible if r.get("id") == self.selected_id), None)
+        if previous is not None and previous not in candidates:
+            candidates.append(previous)
+        started = []
+        for row in candidates:
+            tail = tails.update(row)
+            start = tail.measurements.turn_started_at if tail else None
+            if isinstance(start, (int, float)) and not isinstance(start, bool) and math.isfinite(start) and 0 < start <= now_ms + 30000:
+                started.append((row, start))
+        if started:
+            newest_start = max(start for _, start in started)
+            matches = [row for row, start in started if start == newest_start]
+        else:
+            newest_activity = max((r["updated_at_ms"] for r in candidates), default=None)
+            matches = [r for r in candidates if r["updated_at_ms"] == newest_activity]
+        if len(matches) > 1:
+            previous_match = next((r for r in matches if r["id"] == self.selected_id), None)
+            if previous_match is not None:
+                matches = [previous_match]
+            else:
+                newest_activity = max(r["updated_at_ms"] for r in matches)
+                matches = [r for r in matches if r["updated_at_ms"] == newest_activity]
+        self.selected_id = matches[0]["id"] if len(matches) == 1 else None
+        return matches
 
 
 class ThreadRepository:
@@ -574,11 +656,12 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
     if dashboard_enabled and not once:
         from dashboard import start_server
         start_server(codex_home, runtime, native_enabled=os.name == "nt")
-    tails = TailCache()
+    tails = TailCache(maximum=10)
+    activity_selector = ActivitySelector()
     quota = None
     if account_quota and not once:
         from quota import QuotaPoller
-        quota = QuotaPoller(codex_home)
+        quota = QuotaPoller(codex_home, history_file=runtime / "quota-usage-history.json")
     latency = None
     if network_latency and not once:
         from latency import LatencyPoller
@@ -638,12 +721,10 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
                 matched_at = time.monotonic()
             selected = next((r for r in matches if r["id"] == selected_id), None)
             if selection.get("binding_mode") == "activity":
-                # Internal permission reviews can be newer than the user's task.
-                # Match only the confirmed internal model; keep explicit binding
-                # and history intact, including ordinary user review conversations.
-                rows = [r for r in catalog.rows.values() if r.get("model") != "codex-auto-review"]
-                newest = max((r["updated_at_ms"] for r in rows), default=None)
-                matches = [r for r in rows if r["updated_at_ms"] == newest]
+                # A different task can keep writing while this one is active.
+                # Prefer the most recently started user task so those background
+                # writes do not repeatedly steal the live panel.
+                matches = activity_selector.choose(list(catalog.rows.values()), tails, time.time() * 1000)
                 selected = matches[0] if len(matches) == 1 else None
                 title = selected["title"] if selected else ""
             if selection.get("binding_mode") == "manual" and selected_id:

@@ -136,9 +136,11 @@ def read_limits(codex_home: Path, timeout: float = 25, executable: str | None = 
 
 class QuotaPoller:
     """Keep network latency entirely outside the metrics collector's fast loop."""
-    def __init__(self, codex_home: Path, interval: float = 60):
+    def __init__(self, codex_home: Path, interval: float = 60, history_file: Path | None = None):
+        from quota_forecast import QuotaForecast
         self.codex_home = codex_home
         self.interval = interval
+        self.forecast = QuotaForecast(codex_home, history_file)
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._state = {"state": "loading", "windows": [], "updated_at_ms": None}
@@ -156,7 +158,13 @@ class QuotaPoller:
             self._wake.clear()
             try:
                 windows = read_limits(self.codex_home)
-                state = {"state": "ok", "windows": windows, "updated_at_ms": time.time() * 1000}
+                now = time.time()
+                try:
+                    weekly = next((item for item in windows if item.get("window_minutes") == 10080), None)
+                    runway = self.forecast.observe(weekly, now)
+                except Exception:
+                    runway = {"state": "unavailable"}
+                state = {"state": "ok", "windows": windows, "runway": runway, "updated_at_ms": now * 1000}
                 with self._lock:
                     self._state = state
             except Exception as error:

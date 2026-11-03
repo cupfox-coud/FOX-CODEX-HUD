@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -25,6 +25,8 @@ namespace CodexTokenHud
         [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumProc callback, IntPtr state);
         [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
         [DllImport("user32.dll")] internal static extern bool GetClientRect(IntPtr h, out Rect rect);
+        [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr h, out Rect rect);
+        [DllImport("user32.dll")] internal static extern bool GetCursorPos(out Point point);
         [DllImport("user32.dll")] internal static extern bool ClientToScreen(IntPtr h, ref Point point);
         [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr h);
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr h);
@@ -33,6 +35,7 @@ namespace CodexTokenHud
         [DllImport("user32.dll")] internal static extern IntPtr GetDesktopWindow();
         [DllImport("user32.dll")] internal static extern IntPtr GetAncestor(IntPtr h, uint flags);
         [DllImport("user32.dll")] internal static extern IntPtr GetWindow(IntPtr h, uint command);
+        [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder name, int capacity);
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetWindowPos(IntPtr h, IntPtr after,
             int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] private static extern IntPtr GetWindowLong64(IntPtr h, int index);
@@ -49,6 +52,49 @@ namespace CodexTokenHud
         { return IntPtr.Size == 8 ? GetWindowLong64(h, index) : new IntPtr(GetWindowLong32(h, index)); }
         internal static bool IsTopmost(IntPtr h)
         { return (GetWindowLongPtr(h, -20).ToInt64() & 8) != 0; }
+
+        internal static bool DeferForTransient(string kind, long exStyle, bool hasOwner, bool isForeground,
+            uint ownerPid, uint foregroundPid)
+        {
+            return kind == "#32768" || kind.Equals("tooltips_class32", StringComparison.OrdinalIgnoreCase) ||
+                (isForeground && hasOwner) || (kind == "Chrome_WidgetWin_1" && (exStyle & 0x80) != 0 &&
+                hasOwner && foregroundPid != 0 && ownerPid == foregroundPid);
+        }
+
+        // The TOPMOST bit alone can be stale: another visible window may still
+        // precede this one in the actual desktop Z-order. Do not persist window
+        // names or titles; only inspect bounds and transient-menu state.
+        internal static bool CoveredByWindowAbove(IntPtr hud)
+        {
+            Rect panel;
+            if (!GetWindowRect(hud, out panel) || panel.Right <= panel.Left || panel.Bottom <= panel.Top) return false;
+            IntPtr foreground = GetForegroundWindow();
+            uint foregroundPid = ProcessId(foreground);
+            bool covered = false;
+            IntPtr previous = GetWindow(hud, 3); // GW_HWNDPREV, from nearest to furthest above.
+            for (int count = 0; previous != IntPtr.Zero && count < 512; count++)
+            {
+                IntPtr current = previous;
+                previous = GetWindow(current, 3);
+                if (!IsWindowVisible(current) || IsIconic(current)) continue;
+                Rect other;
+                if (!GetWindowRect(current, out other) || other.Left >= panel.Right || other.Right <= panel.Left ||
+                    other.Top >= panel.Bottom || other.Bottom <= panel.Top) continue;
+                if ((Cloaked(current) ?? 0) != 0) continue;
+                IntPtr owner = GetWindow(current, 4); // GW_OWNER
+                if (owner == hud) continue; // HUD-owned popups remain above the card.
+                var className = new StringBuilder(128);
+                GetClassName(current, className, className.Capacity);
+                string kind = className.ToString();
+                // Let active menus, tooltips and owned dialogs stay usable. The next
+                // check will repair the card after those transient windows close.
+                long exStyle = GetWindowLongPtr(current, -20).ToInt64();
+                uint ownerPid = kind == "Chrome_WidgetWin_1" && owner != IntPtr.Zero ? ProcessId(owner) : 0;
+                if (DeferForTransient(kind, exStyle, owner != IntPtr.Zero, current == foreground, ownerPid, foregroundPid)) return false;
+                covered = true;
+            }
+            return covered;
+        }
         internal static int? Cloaked(IntPtr h)
         {
             try { int value; return DwmGetWindowAttribute(h, 14, out value, 4) == 0 ? (int?)value : null; }
@@ -323,10 +369,13 @@ namespace CodexTokenHud
         private DateTime nextInspection = DateTime.MinValue;
         private DateTime lastStatus = DateTime.MinValue;
         private DateTime nextBackendCheck = DateTime.MinValue;
+        private DateTime nextBackendStart = DateTime.MinValue;
         private bool inspecting;
         private int inspectionGeneration;
         private bool waitingForAutoFocus;
         private int displayError;
+        private DateTime nextZOrderCheck = DateTime.MinValue;
+        private long zOrderRepairs;
         private DateTime lastShowRequest = DateTime.MinValue;
         private bool stopping;
         private Rectangle waitingBounds;
@@ -365,6 +414,9 @@ namespace CodexTokenHud
         private string cornerScreen = "";
         private List<Dictionary<string, object>> quotaWindows = new List<Dictionary<string, object>>();
         private bool quotaCached;
+        private QuotaRunwayDisplay quotaRunway = new QuotaRunwayDisplay();
+        private TodayQuotaDisplay quotaToday = new TodayQuotaDisplay();
+        private QuotaWeekScale quotaScale = new QuotaWeekScale();
         private string quotaNotice = "正在同步账户额度";
         private string quotaSyncText = "每分钟自动同步";
         private readonly Font cornerHeaderFont = new Font("Segoe UI", 10, FontStyle.Bold, GraphicsUnit.Pixel);
@@ -402,11 +454,13 @@ namespace CodexTokenHud
                 tooltip.Active = false;
             }
             menu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e) {
+                RestoreCornerHover();
                 BuildMenu();
                 // WinForms cancels an empty dropdown before raising Opening.
                 // The menu is populated lazily, so re-evaluate that decision.
                 e.Cancel = menu.Items.Count == 0;
             };
+            menu.Closed += delegate { nextZOrderCheck = DateTime.MinValue; };
             tray.Icon = SystemIcons.Information;
             tray.Text = "FOX CODEX HUD";
             tray.ContextMenuStrip = menu;
@@ -417,6 +471,8 @@ namespace CodexTokenHud
             StartBackend();
             ticker.Start();
             StartCornerMotion();
+            CheckMemoryPressure();
+            StartCornerHover();
         }
 
         private string LayoutPath { get { return string.IsNullOrEmpty(manualBindingId) ? configuration.Layout : Path.Combine(runtime, "pinned-layout.json"); } }
@@ -455,6 +511,7 @@ namespace CodexTokenHud
         {
             lastShowRequest = DateTime.UtcNow;
             lastStatus = DateTime.MinValue;
+            nextZOrderCheck = DateTime.MinValue;
             if (Displayed)
             {
                 EnsureShown();
@@ -481,6 +538,9 @@ namespace CodexTokenHud
             RequestShow();
         }
 
+        private static bool ShouldCheckZOrder(bool cornerMode, bool menuVisible, DateTime now, DateTime next)
+        { return cornerMode && !menuVisible && now >= next; }
+
         private void EnsureShown()
         {
             // Form.TopMost reorders/activates the window even when assigned true
@@ -496,18 +556,35 @@ namespace CodexTokenHud
             if (!Native.IsWindowVisible(Handle) || !topmost)
                 displayError = Native.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x53) ? 0 : Marshal.GetLastWin32Error();
             else displayError = 0;
+            // Topmost windows can still drift behind other windows while keeping
+            // the style bit. Check actual overlapping Z-order at most once a
+            // second; never reorder while our own tray menu is open.
+            if (ShouldCheckZOrder(configuration.CornerMode, menu.Visible, DateTime.UtcNow, nextZOrderCheck))
+            {
+                nextZOrderCheck = DateTime.UtcNow.AddSeconds(1);
+                if (Native.CoveredByWindowAbove(Handle))
+                {
+                    if (Native.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13))
+                    { displayError = 0; zOrderRepairs++; }
+                    else displayError = Marshal.GetLastWin32Error();
+                }
+            }
         }
 
         private void StartBackend()
         {
+            if (DateTime.UtcNow < nextBackendStart) return;
+            nextBackendStart = DateTime.UtcNow.AddSeconds(renderMemory.Reduced ? 15 : 3);
             try
             {
                 var args = "-I -X utf8 " + RuntimeConfiguration.Quote(Path.Combine(folder, "metrics.py")) +
                     " --runtime " + RuntimeConfiguration.Quote(runtime) + " --codex-home " + RuntimeConfiguration.Quote(configuration.CodexHome) +
                     " --parent-pid " + Process.GetCurrentProcess().Id + " --dashboard" +
                     (configuration.CornerMode ? " --account-quota --network-latency --reset-radar" : "");
+                var previous = backend;
                 backend = Process.Start(new ProcessStartInfo(configuration.Pythonw, args) {
                     UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = folder, WindowStyle = ProcessWindowStyle.Hidden });
+                if (previous != null) previous.Dispose();
             }
             catch (Exception) { modelText = "采集器未启动"; }
         }
@@ -515,6 +592,18 @@ namespace CodexTokenHud
         private void Tick(object sender, EventArgs e)
         {
             if (stopping) return;
+            try { TickCore(); }
+            catch (OutOfMemoryException)
+            {
+                // A telemetry or window refresh allocation can fail under the same system pressure.
+                try { if (configuration.CornerMode && renderMemory.AllocationFailed()) ApplyMemoryProtection(); }
+                catch (OutOfMemoryException) { }
+            }
+        }
+
+        private void TickCore()
+        {
+            CheckMemoryPressure();
             if (configuration.CornerMode && !cornerClickThrough && DateTime.UtcNow >= cornerUnlockUntil)
                 SetCornerClickThrough(true);
             if (ConsumeAppCloseRequest()) return;
@@ -529,9 +618,10 @@ namespace CodexTokenHud
                 try
                 {
                     double? heartbeat = Json.Number(data, "updated_at_ms");
+                    int staleMs = renderMemory.Reduced ? 45000 : 10000;
                     if (backend != null && !backend.HasExited &&
-                        DateTime.UtcNow - backend.StartTime.ToUniversalTime() > TimeSpan.FromSeconds(10) &&
-                        (!heartbeat.HasValue || EpochMs() - heartbeat.Value > 10000)) backend.Kill();
+                        DateTime.UtcNow - backend.StartTime.ToUniversalTime() > TimeSpan.FromMilliseconds(staleMs) &&
+                        (!heartbeat.HasValue || EpochMs() - heartbeat.Value > staleMs)) backend.Kill();
                     if (backend == null || backend.HasExited) StartBackend();
                 }
                 catch { StartBackend(); }
@@ -559,15 +649,19 @@ namespace CodexTokenHud
             if (File.Exists(previewRequest))
             {
                 File.Delete(previewRequest);
-                using (var bitmap = new Bitmap(Width, Height))
+                try
                 {
-                    using (var graphics = Graphics.FromImage(bitmap))
+                    using (var bitmap = new Bitmap(Width, Height))
                     {
-                        graphics.Clear(BackColor);
-                        OnPaint(new PaintEventArgs(graphics, new Rectangle(Point.Empty, Size)));
+                        using (var graphics = Graphics.FromImage(bitmap))
+                        {
+                            graphics.Clear(BackColor);
+                            OnPaint(new PaintEventArgs(graphics, new Rectangle(Point.Empty, Size)));
+                        }
+                        bitmap.Save(Path.Combine(runtime, "hud-preview.png"), System.Drawing.Imaging.ImageFormat.Png);
                     }
-                    bitmap.Save(Path.Combine(runtime, "hud-preview.png"), System.Drawing.Imaging.ImageFormat.Png);
                 }
+                catch (OutOfMemoryException) { if (renderMemory.AllocationFailed()) ApplyMemoryProtection(); }
             }
             if (DateTime.UtcNow >= lastStatus)
             {
@@ -578,6 +672,7 @@ namespace CodexTokenHud
                     {"managed_visible", Visible}, {"native_topmost", Native.IsTopmost(Handle)},
                     {"minimized", Native.IsIconic(Handle)},
                     {"hud_handle", Handle.ToInt64()}, {"cloaked", Native.Cloaked(Handle)}, {"display_error", displayError},
+                    {"z_order_repairs", zOrderRepairs},
                     {"last_show_request", lastShowRequest.ToString("o")},
                     {"window", view == null ? 0L : view.Handle.ToInt64()}, {"title", selectedTitle},
                     {"thread_id", Json.Text(data, "thread_id")}, {"rate_text", rateText},
@@ -591,16 +686,40 @@ namespace CodexTokenHud
                     {"stage", stageText}, {"left", Left}, {"top", Top}, {"width", Width}, {"height", Height},
                     {"corner_mode", configuration.CornerMode}, {"corner_monitor", cornerScreen},
                     {"click_through", configuration.CornerMode && cornerClickThrough}, {"opacity", Opacity},
+                    {"hover_fade_enabled", configuration.CornerHoverFade}, {"hover_dimmed", hoverDimmed},
+                    {"effective_opacity", hoverAppliedAlpha < 0 ? Opacity : hoverAppliedAlpha / 255.0},
                     {"animation_mode", configuration.CornerMotion}, {"animation_enabled", motionAllowed},
                     {"system_animation_enabled", systemMotionAllowed}, {"animation_frames", motionPaintCount},
-                    {"animation_timer_hz", SystemInformation.TerminalServerSession ? 10 : 25},
+                    {"animation_timer_hz", renderMemory.Reduced ? 0 : SystemInformation.TerminalServerSession ? 10 : 25},
+                    {"render_mode", renderMemory.Reduced ? "low_memory" : "normal"},
+                    {"memory_available_commit_bytes", renderMemory.Last.CommitAvailable},
+                    {"memory_commit_limit_bytes", renderMemory.Last.CommitLimit},
+                    {"memory_available_physical_bytes", renderMemory.Last.PhysicalAvailable},
+                    {"speed_state", speedView.State}, {"live_output_rate", speedView.LiveRate},
+                    {"displayed_output_rate", speedView.Rate}, {"displayed_speed_mode", speedView.Mode},
+                    {"speed_estimated_share", speedView.Share}, {"speed_recent_rate", speedView.Recent},
+                    {"speed_redline", configuration.SpeedRedline},
                     {"account_quota", Json.Object(data, "account_quota")}, {"quota_cached", quotaCached},
+                    {"quota_runway_state", quotaRunway.State}, {"quota_runway_text", quotaRunway.Text}, {"quota_runway_basis", quotaRunway.Basis},
+                    {"quota_today_state", quotaToday.State}, {"quota_today_text", quotaToday.Text}, {"quota_today_remaining_percent", quotaToday.Remaining},
+                    {"quota_scale_state", quotaScale.State}, {"quota_scale_now", quotaScale.Current}, {"quota_scale_end", quotaScale.End}, {"quota_scale_end_label", quotaScale.EndLabel},
+                    {"quota_future_coverage", quotaScale.FutureCoverage},
+                    {"quota_reset_link", QuotaResetLink()}, {"quota_rainbow", LiveWeeklyRemaining().GetValueOrDefault() > 0},
+                    {"quota_rainbow_phase", quotaFlow.Phase}, {"quota_rainbow_cycles_per_second", quotaFlow.CyclesPerSecond},
+                    {"quota_rainbow_speed_basis", speedView.Ready ? speedView.Rate : null},
+                    {"displayed_speed_color", ColorTranslator.ToHtml(displayedSpeedColor)},
                     {"network_latency", Json.Object(data, "network_latency")},
                     {"activity_title", activity.Title}, {"activity_detail", activity.Detail},
                     {"activity_elapsed", activity.ElapsedText}, {"activity_severity", activity.Severity}, {"activity_active", activity.Active},
                     {"activity_average_ms", activity.AverageMs}, {"activity_completed_count", activity.CompletedCount},
                     {"activity_wait_level", activity.WaitLevel},
                     {"reset_radar", Json.Object(data, "reset_radar")}, {"reset_radar_text", resetRadar == null ? "" : resetRadar.Countdown},
+                    {"reset_radar_counting_down", resetRadar != null && resetRadar.CountingDown},
+                    {"reset_radar_calendar_text", resetRadar == null ? "" : resetRadar.CalendarLabel},
+                    {"reset_radar_type", resetRadar == null ? "unknown" : resetRadar.ResetType},
+                    {"reset_radar_heading", resetRadar == null ? "重置雷达" : resetRadar.EventHeading},
+                    {"reset_radar_badge", resetRadar == null ? "" : resetRadar.EventBadge},
+                    {"reset_radar_resets_quota", resetRadar != null && resetRadar.ResetsQuota},
                     {"reset_radar_signal", radarMotion.Active}, {"reset_radar_notice", radarMotion.Notice},
                     {"reset_radar_burst", radarMotion.Bursting(MotionMs)}, {"reset_radar_last_notice", lastResetNoticeTitle},
                     {"reset_radar_last_notice_kind", lastResetNoticeKind}, {"reset_radar_last_notice_at_ms", lastResetNoticeAt},
@@ -792,10 +911,10 @@ namespace CodexTokenHud
             var screen = screens.FirstOrDefault(s => s.DeviceName == configuration.CornerMonitor) ??
                 screens.FirstOrDefault(s => !s.Primary) ?? Screen.PrimaryScreen;
             cornerScreen = screen.DeviceName;
-            scale = Native.Scale(Handle);
+            var area = screen.WorkingArea;
+            scale = Math.Min(Native.Scale(Handle), Math.Min(area.Width / (CornerWidth + 36.0), area.Height / (CornerHeight + 36.0)));
             MinimumSize = Size.Empty;
             int margin = Math.Max(8, (int)Math.Round(18 * scale));
-            var area = screen.WorkingArea;
             var size = new Size(Math.Min(area.Width - margin * 2, (int)Math.Round(CornerWidth * scale)),
                 Math.Min(area.Height - margin * 2, (int)Math.Round(CornerHeight * scale)));
             var wanted = new Rectangle(area.Right - margin - size.Width, area.Top + margin, size.Width, size.Height);
@@ -833,7 +952,8 @@ namespace CodexTokenHud
             long style = Native.GetWindowLongPtr(Handle, -20).ToInt64() | 0x00080000L | 0x08000000L;
             style = enabled ? style | 0x20L : style & ~0x20L;
             Native.SetWindowLongPtr(Handle, -20, new IntPtr(style));
-            Native.SetLayeredWindowAttributes(Handle, 0, (byte)Math.Round(Opacity * 255), 2);
+            hoverAppliedAlpha = -1;
+            RestoreCornerHover();
             Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0037);
             lastStatus = DateTime.MinValue;
             Invalidate();
@@ -852,6 +972,7 @@ namespace CodexTokenHud
         {
             UpdateAccountQuota();
             activity = ActivityDisplay.Read(data, selectedTitle, EpochMs());
+            speedView = SpeedDisplay.Read(data, selectedTitle, EpochMs());
             UpdateResetRadar();
             bool bound = Json.Text(data, "title") == selectedTitle && Json.Text(data, "binding") == "ok";
             var metrics = bound ? Json.Object(data, "metrics") : null;
@@ -872,7 +993,7 @@ namespace CodexTokenHud
                 freshnessText = "自动跟随 · 可右键固定";
             }
             if (!string.IsNullOrEmpty(manualBindingId)) freshnessText = "固定 · " + freshnessText;
-            else if (activityFollowing) freshnessText = "最新活动 · " + freshnessText;
+            else if (activityFollowing) freshnessText = "最近任务 · " + freshnessText;
             if (refreshRequestedAt != DateTime.MinValue)
             {
                 var ack = Json.Object(data, "refresh");
@@ -903,9 +1024,10 @@ namespace CodexTokenHud
                 "本对话周额度 暂无数据";
             var help = new StringBuilder();
             help.AppendLine("当前对话：" + (string.IsNullOrEmpty(selectedTitle) ? "未识别" : selectedTitle));
-            help.AppendLine("绑定方式：" + (string.IsNullOrEmpty(manualBindingId) ? (activityFollowing ? "最新活动日志；不代表前台 CLI/IDE 对话" : "自动跟随桌面对话") : "按 ID 固定对话；右键可解除固定"));
+            help.AppendLine("绑定方式：" + (string.IsNullOrEmpty(manualBindingId) ? (activityFollowing ? "最近发起的本地任务；后台日志不会抢占，可右键固定对话" : "自动跟随桌面对话") : "按 ID 固定对话；右键可解除固定"));
             help.AppendLine("模型：" + modelText);
-            help.AppendLine("速率：最近一次模型响应的真实输出 token / 生成秒数。");
+            help.AppendLine("速度仪表：最近最多 10 次已完成响应的加权均速；工具运行时保留该实测值。右侧曲线显示实时活动，虚线为估算。");
+            help.AppendLine("实测速度含首个输出前的等待；按有效响应的 token/请求耗时加权，工具执行时间不计入下一次模型请求。");
             help.AppendLine("每 0.1 秒检查新统计，界面每 0.15 秒刷新；实际计数在模型响应完成后到达。");
             help.AppendLine("当前状态：" + stageText + " · " + freshnessText);
             var range = Json.Object(data, "range");
@@ -955,6 +1077,14 @@ namespace CodexTokenHud
                 Json.Text(quota, "state") == "loading" || quota == null ? "正在同步账户额度" : "账户额度暂不可用";
             quotaSyncText = quotaCached ? "上次数据 · 等待重新同步" :
                 age < 60000 ? "刚刚同步 · 每分钟更新" : "1 分钟前同步";
+            quotaRunway = QuotaRunwayDisplay.Read(Json.Object(quota, "runway"),
+                quotaWindows.Any(w => Json.Number(w, "window_minutes") == 10080), quotaCached, age);
+            quotaToday = TodayQuotaDisplay.Read(Json.Object(Json.Object(quota, "runway"), "today"),
+                Json.Number(quotaWindows.FirstOrDefault(w => Json.Number(w, "window_minutes") == 10080), "remaining_percent"),
+                quotaCached, age, now);
+            quotaScale = QuotaWeekScale.Read(quotaWindows.FirstOrDefault(w => Json.Number(w, "window_minutes") == 10080),
+                quotaRunway, QuotaRunwayDisplay.Number(Json.Object(quota, "runway"), "calculated_at_ms"),
+                Json.Number(quota, "updated_at_ms") ?? now, now, quotaCached);
         }
 
         private static string QuotaLabel(Dictionary<string, object> window)
@@ -974,7 +1104,7 @@ namespace CodexTokenHud
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            if (configuration.CornerMode) { PaintCorner(e.Graphics); return; }
+            if (configuration.CornerMode) { PaintCornerSafely(e.Graphics); return; }
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             using (var pen = new Pen(Color.FromArgb(68, 91, 109))) e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
             int x = (int)(13 * scale);
@@ -1139,6 +1269,13 @@ namespace CodexTokenHud
                 var passthrough = menu.Items.Add("鼠标穿透（临时关闭 30 秒）") as ToolStripMenuItem;
                 passthrough.Checked = cornerClickThrough;
                 passthrough.Click += delegate { SetCornerClickThrough(!cornerClickThrough); };
+                var hoverFade = menu.Items.Add("悬停时淡化") as ToolStripMenuItem;
+                hoverFade.Checked = configuration.CornerHoverFade;
+                hoverFade.Click += delegate {
+                    configuration.CornerHoverFade = !configuration.CornerHoverFade;
+                    RestoreCornerHover();
+                    configuration.SaveCornerSettings();
+                };
                 var opacityMenu = menu.Items.Add("不透明度") as ToolStripMenuItem;
                 foreach (int percentage in new[] { 60, 78, 90, 100 })
                 {
@@ -1154,6 +1291,14 @@ namespace CodexTokenHud
                     var item = motionMenu.DropDownItems.Add(mode == "on" ? "完整动效" : mode == "off" ? "静态显示" : "跟随系统") as ToolStripMenuItem;
                     item.Checked = configuration.CornerMotion == mode;
                     item.Click += delegate { SetCornerMotion(chosen); };
+                }
+                var redlineMenu = menu.Items.Add("速度仪表满刻度") as ToolStripMenuItem;
+                foreach (int redline in new[] {50, 100, 200, 400, 800, 2000})
+                {
+                    int chosen = redline;
+                    var item = redlineMenu.DropDownItems.Add(redline + " tok/s" + (redline == 200 ? "（默认）" : "")) as ToolStripMenuItem;
+                    item.Checked = configuration.SpeedRedline == redline;
+                    item.Click += delegate { configuration.SpeedRedline = chosen; configuration.SaveCornerSettings(); Invalidate(); };
                 }
                 var monitors = menu.Items.Add("显示屏幕") as ToolStripMenuItem;
                 foreach (var screen in Screen.AllScreens)
@@ -1243,16 +1388,17 @@ namespace CodexTokenHud
             ticker.Stop();
             motionTicker.Stop();
             motionTicker.Dispose();
+            hoverTicker.Stop();
+            hoverTicker.Dispose();
             tray.Visible = false;
             try { if (backend != null && !backend.HasExited) backend.Kill(); } catch { }
             smallFont.Dispose(); labelFont.Dispose(); speedFont.Dispose(); tooltip.Dispose(); tray.Dispose();
             cornerHeaderFont.Dispose(); cornerSmallFont.Dispose(); cornerSpeedFont.Dispose(); cornerCacheFont.Dispose(); cornerQuotaFont.Dispose();
             cornerTimerFont.Dispose(); cornerNumberFont.Dispose(); cornerValueFont.Dispose(); cornerTitleFont.Dispose();
-            cornerRadarFont.Dispose();
+            cornerRadarFont.Dispose(); cornerRunwayFont.Dispose();
+            instrumentFont.Dispose();
             cornerHeroFont.Dispose(); cornerBrandFont.Dispose(); cornerMicroFont.Dispose();
-            if (cornerBackdrop != null) cornerBackdrop.Dispose();
-            if (cornerBlueLight != null) cornerBlueLight.Dispose();
-            if (cornerMintLight != null) cornerMintLight.Dispose();
+            ReleaseMaterial();
             base.OnFormClosing(e);
         }
         protected override void OnFormClosed(FormClosedEventArgs e)

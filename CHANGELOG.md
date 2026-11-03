@@ -1,5 +1,230 @@
 # Changelog
 
+## FOX CODEX HUD 1.3.0-beta.8.corner.45
+
+Fix banked reset-card grants incorrectly activating quota-spending guidance.
+Gate quota spectrum and refill feedback on explicit global/global_and_banked
+semantics. Label card grants in violet with a persistent no-automatic-reset
+caption. Preserve API dates/countdowns and distinguish forecasts, completions
+and approaching notifications. Unknown types fail closed for quota guidance;
+type corrections invalidate prior notice identity, and unrelated notices cannot
+recolor the active event. Preserve all saved display preferences.
+
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.44
+
+Bind quota rainbow velocity to the displayed output rate using continuous,
+smoothed phase integration. Color the main speed digits and lit gauge by rate,
+independently of the configured meter scale. Extend valid reset spectrum feedback
+to the complete quota surface and timeline while retaining diagonal gap hatching,
+calendar labels and exact values. Verify acceleration, pauses, static/memory modes,
+all native interaction regressions and 8,000 complete-card redraws.
+
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.43
+
+Add a slow pastel spectrum to live positive weekly quota digits without changing
+their value or geometry. Valid reset forecasts strengthen the spectrum and link
+radar and quota with an upward light, deduplicated arrival sweep and usage-priority
+label. Public completion briefly requests account verification rather than
+claiming a refill. Preserve neutral cached states, exhaustion warnings, static
+preference, memory safeguards and the existing panel layout.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.42
+
+Add the missing per-user Start menu shortcut so Windows app search can find
+and reopen the HUD. Keep desktop and Start menu entries pinned to the same
+installation. Uninstall removes only shortcuts targeting its own executable.
+
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.41
+
+Replace the capsule rail with an open timeline using actual calendar/clock ticks
+and a depletion event marker. Distinguish the forecast unavailable interval with
+diagonal hatching, a dashed baseline and an explicit duration legend. Slowly
+move only the hatch; preserve its static pattern for cached data, reduced motion
+and memory pressure. Center each daily quota label and its complete number/unit
+group within three evenly spaced columns. Preserve forecast math and footprint.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.40
+
+Show only the future interval from now to the official reset. Explicitly label
+solid mint coverage and the amber dark shortage segment with its duration;
+remove elapsed time and day ticks. Normalize coverage against remaining time
+and animate only the shortage, keeping numbers and usable coverage steady.
+Cached data, static preference and memory protection suppress motion while
+preserving clear text and surface differences. Keep forecast math, stable
+depletion dates, the existing graphite style and the 400x738 footprint.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.39
+
+Integrate a continuous seven-day runway rail with the existing graphite/mint
+visual language. Subtle day ticks, current and depletion markers distinguish
+elapsed time, projected coverage and the gap until reset; percentage remains
+the hero value. Show a qualified depletion date anchored to the held forecast's
+calculation timestamp and the official reset calendar. Handle cached, missing,
+near-reset and exhausted states without implying false precision. Keep the
+400x738 footprint, existing type scale and memory safeguards.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.38
+
+Replace the unlabeled runway-ratio strip with an explicit usage assessment:
+estimated early depletion, sufficient runway until reset, or a qualified waiting
+state. The quota progress bar now exclusively represents actual weekly balance.
+Move the over-budget glint along the closed bezel instead of a separate horizontal
+track. Quota calculations, footprint and motion/resource safeguards are unchanged.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.37
+
+Preserve negative daily budget balances instead of clamping overspending to zero.
+Show an explicit over-budget label and the signed quota amount; restore deficits
+from existing local ledgers without changing allocation or double-charging the
+next day. Add a compact obsidian warning with warm-white text, amber rim breathing,
+a moving reflection and travelling filament. Reuse the existing animation clock;
+cached advice, reduced motion and memory protection retain a static warning.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.36
+
+Replace relative reduction advice with today's remaining recommended quota.
+Freeze a local-day allocation from an observed balance and the time until
+midnight/reset, then debit actual quota loss. Restore the ledger across restarts,
+reuse existing observations on upgrade, and rebase only for a new day, a detected
+refill or an official cycle change. Never infer an unobserved midnight balance.
+Cached advice expires after three minutes or at midnight/reset, whichever comes
+first. The weekly runway calculation and panel footprint remain unchanged.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.35
+
+Replace the fixed seven-day reference in the quota card with actionable usage
+advice. Show the approximate relative reduction needed for cycle usage to fit
+the daily budget until reset, in five-percentage-point steps. Use the held,
+unrounded forecast ratio so the recommendation shares the stable publication
+interval. Sufficient, depleted, observing and cached states remain explicit;
+the weekly forecasting method is unchanged.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.34
+
+Unify the native HUD around a quiet graphite surface and a consistent 20-pixel
+gutter without enlarging its 400×738 footprint. Weekly balance and runway now
+share the main row, with the seven-day baseline, cycle pace and daily allowance
+in aligned columns. Move the public reset radar into its own horizontal strip,
+keeping its countdown and complete calendar deadline separate from account reset.
+Group both routes on one surface, simplify the response curve, improve caption
+contrast and reserve stronger lighting for risk and incoming radar signals.
+Retain status explanations, estimate labels, hover fade, click-through, topmost
+recovery, reduced motion and memory protection. Quota and speed formulas are unchanged.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.33
+
+Keep the displayed runway, time to reset and shortfall arithmetically consistent
+after rounding. When both rounded times are equal, use a near-reset label instead
+of inventing a precise shortfall. The seven-day baseline and cycle pace are
+unchanged; the forecast is recalculated immediately when upgrading.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.32
+
+Use the seven-day quota window as the runway baseline. Show 100% / 7 as a
+reference, calculate the cycle's average daily usage from the official remaining
+balance and reset time, and show the daily budget needed to last until reset.
+The predicted runway follows the cycle pace rather than a short burst; detected
+mid-cycle balance increases start a new observation period. Estimates and
+timeline share the same held, rounded pace and remain explicitly approximate.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.31
+
+Combine weekly remaining quota, estimated runway and recent consumption into a
+single compact surface. A small time marker and status capsule retain the
+projected shortfall without a separate oversized card. The panel is 90 logical
+pixels shorter while preserving the reset radar and existing measurements.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.30
+
+The weekly quota runway now compares the estimated exhaustion time against the
+personal weekly reset on a labeled timeline, with the estimated shortfall and
+observed consumption rate. Orange highlights projected early exhaustion and red
+adds a gentle pulse when six hours or less remain. Cached and insufficient data
+are labeled without live alarms; reduced motion and low-memory modes stay usable.
+The marker uses unrounded times while visible durations remain coarse and held.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.29
+
+The weekly quota card estimates how long the remaining balance could last at
+the recently observed account quota consumption rate. It uses up to six hours
+of actual percentage observations, requires at least one hour and two percentage
+points of change, and holds rounded estimates for ten minutes unless the balance
+falls substantially. Resets, refills, expired data and insufficient samples do
+not reuse an obsolete estimate. A forecast beyond the weekly reset is labeled as
+lasting to that reset. No token-to-quota conversion or new network request is used.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.28
+
+The click-through corner card now fades to 25% opacity when the pointer is over
+the card and restores the user's normal opacity on exit. The transition respects
+reduced motion, supports multiple monitors and remains available in low-memory
+mode. The tray menu can disable the feature; temporary interaction and tray menus
+restore normal opacity. Pointer coordinates are checked locally and never logged.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.27
+
+The corner card now checks the actual overlapping desktop Z-order, rather than
+relying only on the topmost style flag. When another regular or topmost window
+covers it, the card restores its topmost position without activating or moving.
+Checks are rate-limited and wait while the tray menu or an active transient
+menu, tooltip, or owned dialog needs to remain above the card.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.26
+
+The Windows corner card now monitors system-wide commit and physical memory
+headroom. During sustained memory pressure it releases cached bitmap effects,
+pauses motion, and refreshes less often while retaining current data. Full
+visuals resume after 30 seconds of adequate headroom. GDI+ allocation failures
+are caught and retried with lighter rendering; a minimal emergency view is used
+if the retry fails. The managed watcher restarts a HUD that exits with a nonzero
+code, with bounded backoff, while honoring clean manual exits.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.25
+
+Automatic following now favors the most recently started user task instead of
+alternating whenever another task writes a log entry. Internal subagents do not
+steal automatic selection; manual binding remains available. The speed instrument
+leads with a duration-weighted average of up to ten completed responses, retains
+it across tool pauses and idle periods, and labels it as a recent average. Live
+activity and estimated history remain in the trend graph, with no estimated tokens
+added to confirmed totals. Missing or stale measurements still display as unavailable.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.24
+
+The reset radar now displays a live countdown prominently, while keeping the
+publisher's calendar reference underneath. For date-only forecasts with an API
+window, the countdown uses the supplied window end and labels it as an estimate;
+the exact reset time remains unknown. A deadline or inferred point counts to its
+provided timestamp. Elapsed, missing and stale forecasts do not invent countdowns.
+Notification text distinguishes the window end from an actual reset time.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.23 — 2026-10-26
+
+Fix a false dip at the right edge of the speed trend: partial-second token amounts
+are normalized by their observed duration, and an exact second boundary no longer
+adds an unobserved zero point. Constant generation therefore stays level while
+genuine pauses remain visible. Trend values are explicitly tok/s; confirmed
+token counters and the three-second headline speed remain unchanged.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.22 — 2026-10-26
+
+Live throughput now uses a three-second window over request intervals, including
+first-output waiting and excluding explicit tool execution. In-flight estimates
+use duration-weighted recent measured responses from the selected conversation
+and model, remain visibly qualified, and are replaced on usage completion.
+Estimates never inflate confirmed counters. Cache hit rates are input-weighted.
+Cold replay preserves model context and excludes copied fork history.
+
+A 36-segment heat instrument, analytic spring, speed-sensitive comet, measured
+completion ripples and a 60-second measured/estimated trend lead the 400×688 card.
+The tray persists the instrument redline; small work areas scale the card to fit.
+Quota, deadline radar, both independent routes, click-through and motion settings
+remain available. Source integration is local/read-only, with no added probes or
+AI requests. Agent Speed attribution and MIT notice ship with the release.
+
 ## FOX CODEX HUD 1.3.0-beta.8.corner.21 — 2026-10-24
 
 The tray now offers full motion, system preference and static display independently

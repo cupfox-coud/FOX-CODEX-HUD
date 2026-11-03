@@ -144,7 +144,7 @@ class HudBindingTests
             Check(Json.Text(Json.Read(Path.Combine(config.Runtime, "selection.json")), "binding_mode") == "activity" &&
                 Native.IsWindowVisible(hud.Handle) && (string)Field(hud, "rateText") == "30.0",
                 "application-follow mode displays CLI/IDE latest activity without a desktop window");
-            Check(((string)Field(hud, "freshnessText")).StartsWith("最新活动"), "activity following is labeled rather than claimed as foreground chat");
+            Check(((string)Field(hud, "freshnessText")).StartsWith("最近任务"), "activity following is labeled rather than claimed as foreground chat");
             Check(Item(hud, "随 Codex / CLI / IDE 启动") != null && Item(hud, "开机自动启动") == null,
                 "application-follow option replaces logon HUD startup");
             Json.Write(Path.Combine(config.Runtime, "manual-binding.json"), new Dictionary<string, object> {{"thread_id", "manual-id"}, {"title", "Manual fixture"}});

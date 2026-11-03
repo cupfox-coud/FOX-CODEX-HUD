@@ -1,5 +1,9 @@
 # Privacy
 
+The optional weekly-quota runway uses normalized weekly percentages and the reset timestamp already returned by the local authenticated client. It derives the cycle average under a full-at-reset assumption; a detected balance increase switches to observations after that change. Up to 400 numeric observations, reset timestamp, adjustment anchor, numeric local-day budget ledger (day boundaries, starting balance, allocation and observed debit) and the rounded estimate are retained locally in `runtime/quota-usage-history.json`; the forecast does not read session logs or retain log paths, identities, message contents or credentials. It makes no additional network request.
+
+On Windows, the optional hover fade samples the current cursor position locally to determine whether it is inside the card. Cursor coordinates and movement history are not saved or transmitted. The local runtime status records only whether the card is dimmed and its current opacity.
+
 API deadline predictions are shown as their supplied upper-bound calendar date, with an estimate label and time remaining. Inferred points retain their supplied timestamp. Passed predictions keep an expired reference date until the publisher updates them; a date display alone never creates a completion record. Existing source freshness and polling limits still apply.
 
 Public reset radar requests follow the configured Windows system HTTP proxy or explicit HTTPS_PROXY setting, respecting NO_PROXY and system bypass rules. HTTP CONNECT preserves TLS certificate verification for didcodexreset.com. Proxy addresses are used only in memory and are not saved in snapshots or diagnostics. Authenticated and non-HTTP proxy URLs are unsupported; their credentials are never sent.
