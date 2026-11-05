@@ -11,6 +11,12 @@ Copyright (c) 2026 zoefix, MIT License; the full notice is preserved in
 [licenses/agent-speed-MIT.txt](licenses/agent-speed-MIT.txt) and shipped in releases.
 See [docs/SPEED.md](docs/SPEED.md) for the calculation rules and integration scope.
 
+The corner.46 update rechecked Agent Speed revision
+`384ce020cc655133e95aaad5cc085f3985f0ed99` (2026-11-04). Incremental change cadence,
+fixed-slot crossfades and changed-digit rolls are informed by `LiveMonitor.cs`,
+`Dashboard/LiveValue.cs` and `Boards/Scene/BoardHeroNumber.cs`. The native GDI+
+implementation uses no upstream binaries or GPU textures; the same MIT notice applies.
+
 Portable releases include the unmodified official Windows x64 CPython 3.14.8 embeddable distribution. It is governed by the Python Software Foundation license and the historical/component licenses supplied in that archive. The full archive contents, including `python/LICENSE.txt`, are preserved. Python is not relicensed under this project's MIT license.
 
 Official download and checksum source: [Python 3.14.8 release](https://www.python.org/downloads/release/python-3148/).

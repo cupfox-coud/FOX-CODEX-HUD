@@ -322,6 +322,7 @@ class SessionTail:
         self.file_size = 0
         self.file_mtime_ms: float | None = None
         self.mtime_ns: int | None = None
+        self.live_quota = None
 
     def reset(self) -> None:
         self.measurements = Measurements(self.measurements.model)
@@ -329,6 +330,7 @@ class SessionTail:
         self.partial = b""
         self.initialized = False
         self.anchor = b""
+        self.live_quota = None
 
     def restore_lifecycle(self, stream, end: int) -> None:
         """Recover explicit turn state before the sample tail, without replaying usage."""
@@ -435,6 +437,7 @@ class SessionTail:
         self.measurements.response_history = history or Measurements()
 
     def update(self) -> None:
+        live_read = self.initialized
         try:
             stat = self.path.stat()
             size = stat.st_size
@@ -461,6 +464,7 @@ class SessionTail:
                     if f.read(len(self.anchor)) != self.anchor:
                         self.reset()  # Same file was rewritten and grew before the next poll.
                 if not self.initialized:
+                    live_read = False
                     # Forks can prepend copied records whose timestamps predate this
                     # file's creation. Recover that guard even when starting at its tail.
                     f.seek(0)
@@ -500,6 +504,14 @@ class SessionTail:
                 continue
             if isinstance(event, dict):
                 self.measurements.feed(event)
+                payload = event.get('payload')
+                if (live_read and event.get('type') == 'event_msg' and isinstance(payload, dict)
+                        and payload.get('type') == 'token_count'):
+                    from quota import normalize_log_limits
+                    windows = normalize_log_limits(payload.get('rate_limits'))
+                    at = timestamp_ms(event.get('timestamp'))
+                    if windows and at and (not self.live_quota or at > self.live_quota[1]):
+                        self.live_quota = (windows, at)
 
     def source(self) -> dict:
         return {"path": str(self.path), "state": self.source_state, "size": self.file_size,
@@ -733,6 +745,8 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
                 selected = matches[0]
             status = "ok" if selected else "ambiguous" if len(matches) > 1 else "unbound"
             tail = tails.update(selected, force) if selected else None
+            if quota and tail and tail.live_quota:
+                quota.accept(tail.live_quota[0], tail.live_quota[1] / 1000)
             metrics = tail.measurements.snapshot() if tail else None
             if force:
                 refresh_result = {"request_id": refresh_id, "completed_at_ms": time.time() * 1000,
@@ -755,13 +769,15 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
             if once:
                 result["updated_at_ms"] = time.time() * 1000
                 return result
-            if result != last_payload or time.monotonic() - last_published >= 1:
+            if result != last_payload or time.monotonic() - last_published >= .5:
                 last_payload = result.copy()
                 result["updated_at_ms"] = time.time() * 1000
                 atomic_json(runtime / "metrics.json", result)
                 last_published = time.monotonic()
             time.sleep(0.1)
     finally:
+        if quota:
+            quota.close()
         if latency:
             latency.close()
         if radar:

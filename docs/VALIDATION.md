@@ -1,5 +1,46 @@
 # Validation and limits
 
+## 1.3.0-beta.8.corner.47 — actual consumption and coherent motion
+
+The full Windows suite collected 258 Python cases: 245 passed and 13 optional
+Qt cases were skipped. Native checks passed: presentation 19, binding 30,
+Z-order 22, hover 25, corner HUD 232, activity 65, radar 124, notifications 48,
+speed/readout motion 56. Four 2,000-frame loops retained stable GDI/USER counts;
+mean complete-card rendering was 8.2–9.0 ms.
+
+Regression cases distinguish 5% actual consumption from a 20.7%/day projection,
+rebase full/partial refills and keep cycle consumption separate from midnight
+daily-budget resets. Further cases reject new log timestamps carrying old balances
+or cycles, confirm refills independently and preserve ledgers through one-point
+corrections. Motion cases verify continuous orbital phase, eased energy,
+bounded resume, static/memory behavior and receipts without initial/repeated/
+stale replay. The packaged runtime and canonical installation are checked
+separately from synthetic rendering; local reports remain outside the package.
+
+## 1.3.0-beta.8.corner.46 — live updates and readout motion
+
+On Windows x64, the Python suite collected 251 cases: 238 passed and 13 optional
+Qt GUI cases were skipped. Native checks passed: presentation 19, binding 30,
+Z-order 22, hover 25, corner HUD 231, activity 65, radar 124, notifications 48,
+and speed/readout motion 43. Four 2,000-frame complete-card stress loops kept
+GDI/USER counts stable; mean full-card render times were 7.7–8.7 ms.
+
+New cases cover immediate debits, new-cycle recovery from a negative daily
+allowance, midnight without new events, rejecting history/late API responses,
+live-only normalized log ingestion, early-cycle numeric display, current-speed
+priority, interruptible 260-ms digit transitions, static mode and model/session
+switches. Synthetic native frames additionally verify the final animated value.
+
+The packaged CPython 3.14.8 portable smoke passed without system Python. The
+canonical installed corner.46 was checked with one visible/topmost/click-through
+HUD, preserved display settings, working startup and both shortcuts, fresh quota,
+radar and both routes, moving rainbow phase and no new error-log entries. A live
+six-second observation produced 13 speed frames, roughly 410–549 ms apart, and
+confirmed cycle arithmetic advanced while unchanged daily spending stayed fixed.
+One official quota read took 11.36 seconds; local quota events avoid that network
+wait. The 100-ms log cadence starts after the client writes a record: this is not
+evidence of per-token streaming access or a guaranteed remote API response time.
+
 ## 1.3.0-beta.8 — application following
 
 On Windows x64 / Python 3.14.8 / Qt 6.10.3, the complete Python suite passed **78 checks**, including 22 application-follow checks and the Qt menu/owner-close regression. Coverage includes idle/debounce, last-client grace, parallel clients, manual quit suppression, preserving manually launched windows, recovery during an automatic close, exclusive watcher ownership, executable classification/exact custom paths, safe failed registration, headless operation without Qt, latest-log ties, stale exited-process status, argument/exit-code passthrough, shared launcher locks, data-choice migration and a real watcher→dashboard→owned-close round trip. Synthetic logs and short fixture timers are used for lifecycle integration; no real chat contents are captured.

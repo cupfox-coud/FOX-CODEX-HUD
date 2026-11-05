@@ -1,5 +1,52 @@
 # Changelog
 
+## FOX CODEX HUD 1.3.0-beta.8.corner.48
+
+The speed dial moves from aqua through violet and rose to gold. A substantial
+rise within 1.6 seconds sends a bright arc around the dial and a reflection
+across the speed surface. Its short-lived label gives the observed gain in
+tok/s. Steady samples settle to the heat color. Weekly balance now sits inside
+a battery with charge proportional to the account percentage. The separate
+dated axis shows forecast coverage and the hatched wait until reset.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.47
+
+Separate actual quota consumption from the projected daily rate. “本轮已用”
+shows actual consumption since the weekly reset or observed refill: 5% stays
+5%, not its 20.7%/day extrapolation. Reset/refill rebases this amount; midnight
+resets daily advice independently.
+
+Reject freshly appended local events carrying an older/higher cached balance
+or an earlier cycle. Confirm same-cycle refills through the independent account
+endpoint; one-point balance corrections cannot erase the spending ledger.
+
+Refine graphite surfaces with inset bevels, a metallic instrument well and
+continuous light flow. Integrate orbit velocity to prevent speed changes from
+jumping the comet. Ease fractional gauge segments, reveal new route samples,
+roll countdown/latency/response digits and crossfade activity. Real debits and
+account refills receive distinct bounded edge receipts; initial, repeated and
+stale snapshots cannot replay them. Preserve static/low-memory fallbacks and
+public card-grant/global-reset separation.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.46
+
+Update quota and daily advice directly from fresh, appended Codex quota events,
+with independent 30-second API reconciliation and reset-boundary checks. Reject
+history replay and out-of-order responses. Recalculate cycle pace every second
+without renewing the source timestamp, preserving signed daily spending and
+rebasing immediately on a new cycle/refill or local midnight. Replace the
+ten-minute forecast freeze and six-hour blank with live arithmetic and qualified
+early estimates.
+
+Show the current 3-second speed window during generation; qualify retained last
+measurements during tool/idle pauses. Adopt Agent Speed's 100-ms change delivery /
+500-ms calculation cadence, 260-ms changed-digit rolls, and status crossfades.
+Animate speed, cache, weekly quota and daily figures without counting invented
+intermediate values. Scroll the speed graph by timestamps and ease its scale.
+Short transitions use a 16-ms animation timer; ordinary motion remains 40 ms,
+and static/memory modes settle immediately. Preserve reset-card/global-reset
+separation and all installed display/startup settings.
+
 ## FOX CODEX HUD 1.3.0-beta.8.corner.45
 
 Fix banked reset-card grants incorrectly activating quota-spending guidance.

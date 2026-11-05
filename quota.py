@@ -47,6 +47,19 @@ def normalize_limits(result: dict) -> list[dict]:
     return [windows[key] for key in sorted(windows)]
 
 
+def normalize_log_limits(raw) -> list[dict]:
+    """Only quota metadata from new local token_count events; never retain credits/account data."""
+    if not isinstance(raw, dict) or raw.get('limit_id') not in (None, 'codex'):
+        return []
+    bucket = {'limitId': 'codex'}
+    for name in ('primary', 'secondary'):
+        item = raw.get(name)
+        if isinstance(item, dict):
+            bucket[name] = {new: item.get(old) for old, new in (
+                ('used_percent', 'usedPercent'), ('window_minutes', 'windowDurationMins'), ('resets_at', 'resetsAt'))}
+    return normalize_limits({'rateLimits': bucket})
+
+
 def find_codex() -> str | None:
     # Desktop updates change the versioned bin directory. Re-resolve every poll.
     desktop = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenAI" / "Codex" / "bin"
@@ -136,42 +149,99 @@ def read_limits(codex_home: Path, timeout: float = 25, executable: str | None = 
 
 class QuotaPoller:
     """Keep network latency entirely outside the metrics collector's fast loop."""
-    def __init__(self, codex_home: Path, interval: float = 60, history_file: Path | None = None):
+    def __init__(self, codex_home: Path, interval: float = 30, history_file: Path | None = None):
         from quota_forecast import QuotaForecast
         self.codex_home = codex_home
         self.interval = interval
         self.forecast = QuotaForecast(codex_home, history_file)
         self._lock = threading.Lock()
         self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._observed_at = 0.0
+        self._calculated_at = 0.0
+        self._refill_probe_at = 0.0
         self._state = {"state": "loading", "windows": [], "updated_at_ms": None}
-        threading.Thread(target=self._run, name="account-quota", daemon=True).start()
+        self._thread = threading.Thread(target=self._run, name="account-quota", daemon=True)
+        self._thread.start()
 
     def snapshot(self) -> dict:
         with self._lock:
+            now = time.time()
+            # Clock-dependent advice also rolls over at midnight with no log activity.
+            # Keep the source timestamp unchanged: a recalculation is not a fresh API read.
+            age = now * 1000 - (self._state.get('updated_at_ms') or 0)
+            if 0 <= age <= 180000 and (now - self._calculated_at >= 1 or now < self._calculated_at):
+                self._calculate(now)
             return dict(self._state)
+
+    def _calculate(self, now):
+        weekly = next((w for w in self._state['windows'] if w['window_minutes'] == 10080), None)
+        self._state = dict(self._state, runway=self.forecast.observe(weekly, now))
+        self._calculated_at = now
+
+    def accept(self, windows, observed_at, source='local_event'):
+        now = time.time()
+        if not windows or not isinstance(observed_at, (int, float)) or not math.isfinite(observed_at):
+            return False
+        # No history replay, future clock, or late API response may roll back a newer balance.
+        if observed_at < now - 30 or observed_at > now + 1:
+            return False
+        with self._lock:
+            if observed_at <= self._observed_at:
+                return False
+            if source == 'local_event':
+                previous = {w['window_minutes']: w for w in self._state['windows']}
+                for candidate in windows:
+                    old = previous.get(candidate['window_minutes'])
+                    if not old:
+                        continue
+                    # A freshly appended token event can carry quota cached at
+                    # request start. Its log timestamp is not a balance timestamp.
+                    # Never undo a newer debit/cycle on that evidence; ask the
+                    # independent account endpoint to confirm a same-cycle refill.
+                    reset_change = candidate['resets_at'] - old['resets_at']
+                    higher = candidate['remaining_percent'] > old['remaining_percent'] + 1e-9
+                    if reset_change < -120 or (abs(reset_change) <= 120 and higher):
+                        if now - self._refill_probe_at >= 10:
+                            self._refill_probe_at = now
+                            self._wake.set()
+                        return False
+            self._observed_at = observed_at
+            self._state = {'state': 'ok', 'windows': windows, 'source': source,
+                           'updated_at_ms': observed_at * 1000}
+            self._calculate(now)
+        return True
+
+    def close(self):
+        self._stop.set()
+        self._wake.set()
+        self._thread.join(timeout=1)
 
     def refresh(self):
         self._wake.set()
 
     def _run(self):
-        while True:
+        failures = 0
+        while not self._stop.is_set():
             self._wake.clear()
+            started = time.time()
             try:
                 windows = read_limits(self.codex_home)
-                now = time.time()
-                try:
-                    weekly = next((item for item in windows if item.get("window_minutes") == 10080), None)
-                    runway = self.forecast.observe(weekly, now)
-                except Exception:
-                    runway = {"state": "unavailable"}
-                state = {"state": "ok", "windows": windows, "runway": runway, "updated_at_ms": now * 1000}
-                with self._lock:
-                    self._state = state
+                self.accept(windows, started, 'account_api')
+                failures = 0
             except Exception as error:
+                failures += 1
                 reason = str(error) if isinstance(error, QuotaError) else "request_failed"
                 with self._lock:
-                    self._state = dict(self._state, state="unavailable", reason=reason)
-            self._wake.wait(self.interval)
-            # A tray refresh can wake the poller, but cannot create a request storm.
-            self._wake.clear()
-            time.sleep(1)
+                    if self._observed_at <= started and not (self._state.get('source') == 'local_event' and
+                            0 <= time.time() - self._observed_at < 30):
+                        self._state = dict(self._state, state="unavailable", reason=reason)
+            delay = min(60, 5 * 2 ** min(failures - 1, 4)) if failures else self.interval
+            with self._lock:
+                deadlines = [w['resets_at'] for w in self._state['windows']]
+            if deadlines:
+                until = min(deadlines) - time.time()
+                delay = min(delay, max(5, until + .25))
+            self._wake.wait(delay)
+            # Manual refresh is coalesced; even repeated requests cannot flood the API.
+            self._stop.wait(max(0, 1 - (time.time() - started)))

@@ -418,7 +418,7 @@ namespace CodexTokenHud
         private TodayQuotaDisplay quotaToday = new TodayQuotaDisplay();
         private QuotaWeekScale quotaScale = new QuotaWeekScale();
         private string quotaNotice = "正在同步账户额度";
-        private string quotaSyncText = "每分钟自动同步";
+        private string quotaSyncText = "随用量更新 · 自动核对";
         private readonly Font cornerHeaderFont = new Font("Segoe UI", 10, FontStyle.Bold, GraphicsUnit.Pixel);
         private readonly Font cornerSmallFont = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Regular, GraphicsUnit.Pixel);
         private readonly Font cornerSpeedFont = new Font("Segoe UI", 26, FontStyle.Bold, GraphicsUnit.Pixel);
@@ -466,7 +466,7 @@ namespace CodexTokenHud
             tray.ContextMenuStrip = menu;
             tray.Visible = true;
             tray.DoubleClick += delegate { RequestShow(); RequestRefresh(); };
-            ticker.Interval = 150;
+            ticker.Interval = 100;
             ticker.Tick += Tick;
             StartBackend();
             ticker.Start();
@@ -702,6 +702,8 @@ namespace CodexTokenHud
                     {"account_quota", Json.Object(data, "account_quota")}, {"quota_cached", quotaCached},
                     {"quota_runway_state", quotaRunway.State}, {"quota_runway_text", quotaRunway.Text}, {"quota_runway_basis", quotaRunway.Basis},
                     {"quota_today_state", quotaToday.State}, {"quota_today_text", quotaToday.Text}, {"quota_today_remaining_percent", quotaToday.Remaining},
+                    {"quota_today_spent_percent", quotaToday.Spent},
+                    {"quota_consumed_since_reset_percent", quotaRunway.Consumed},
                     {"quota_scale_state", quotaScale.State}, {"quota_scale_now", quotaScale.Current}, {"quota_scale_end", quotaScale.End}, {"quota_scale_end_label", quotaScale.EndLabel},
                     {"quota_future_coverage", quotaScale.FutureCoverage},
                     {"quota_reset_link", QuotaResetLink()}, {"quota_rainbow", LiveWeeklyRemaining().GetValueOrDefault() > 0},
@@ -1076,7 +1078,7 @@ namespace CodexTokenHud
             quotaNotice = expired ? "额度窗口已重置 · 等待同步" :
                 Json.Text(quota, "state") == "loading" || quota == null ? "正在同步账户额度" : "账户额度暂不可用";
             quotaSyncText = quotaCached ? "上次数据 · 等待重新同步" :
-                age < 60000 ? "刚刚同步 · 每分钟更新" : "1 分钟前同步";
+                age < 30000 ? "刚刚同步 · 随用量更新" : "自动核对中";
             quotaRunway = QuotaRunwayDisplay.Read(Json.Object(quota, "runway"),
                 quotaWindows.Any(w => Json.Number(w, "window_minutes") == 10080), quotaCached, age);
             quotaToday = TodayQuotaDisplay.Read(Json.Object(Json.Object(quota, "runway"), "today"),
@@ -1085,6 +1087,9 @@ namespace CodexTokenHud
             quotaScale = QuotaWeekScale.Read(quotaWindows.FirstOrDefault(w => Json.Number(w, "window_minutes") == 10080),
                 quotaRunway, QuotaRunwayDisplay.Number(Json.Object(quota, "runway"), "calculated_at_ms"),
                 Json.Number(quota, "updated_at_ms") ?? now, now, quotaCached);
+            var receiptWindow = quotaWindows.FirstOrDefault(w => Json.Number(w, "window_minutes") == 10080);
+            quotaReceipt.Observe(Json.Number(receiptWindow, "remaining_percent"), Json.Number(receiptWindow, "resets_at"),
+                Json.Number(quota, "updated_at_ms") ?? 0, MotionMs, !quotaCached);
         }
 
         private static string QuotaLabel(Dictionary<string, object> window)

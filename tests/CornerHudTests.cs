@@ -282,6 +282,7 @@ class CornerHudTests
             CheckRadarMotion(hud, root);
             CheckMotionPreferences(hud, config);
             SaveDesignAnimation(hud, root);
+            SaveRealtimeAnimation(hud, root);
 #if HUD_TEST
             CheckMemoryProtection(hud, root);
 #endif
@@ -608,9 +609,22 @@ class CornerHudTests
             Set(hud, "data", data); Set(hud, "motionAllowed", true); Set(hud, "nextMotionPreference", double.MaxValue);
             Set(hud, "previewMotionClock", 1000.0); Call(hud, "UpdateMetrics");
             Check((string)Call(hud, "QuotaResetLink") == "none", "everyday rainbow never fabricates a reset signal");
+            using (var empty = new Bitmap(200, 350))
+            using (var quarter = new Bitmap(200, 350))
+            using (var full = new Bitmap(200, 350))
+            {
+                using (var g = Graphics.FromImage(empty)) Call(hud, "PaintQuotaBattery", g, 0.0);
+                using (var g = Graphics.FromImage(quarter)) Call(hud, "PaintQuotaBattery", g, 25.0);
+                using (var g = Graphics.FromImage(full)) Call(hud, "PaintQuotaBattery", g, 100.0);
+                Check(quarter.GetPixel(68, 337) == full.GetPixel(68, 337) &&
+                    quarter.GetPixel(77, 337) == empty.GetPixel(77, 337) &&
+                    full.GetPixel(170, 337) != quarter.GetPixel(170, 337),
+                    "battery charge occupies exactly the first quarter at 25 percent independently of forecast coverage");
+            }
             using (var a = new Bitmap(400, 350)) using (var b = new Bitmap(400, 350))
             {
                 var font = (Font)Field(hud, "cornerHeroFont");
+                ((ReadoutTransition)Field(hud, "quotaDigits")).Set("58", "weekly", 700, false);
                 using (var g = Graphics.FromImage(a)) { g.Clear(Color.Transparent); Set(hud, "previewMotionClock", 1000.0); Call(hud, "PaintQuotaNumber", g, "58", font, 58.0, true); }
                 using (var g = Graphics.FromImage(b)) { g.Clear(Color.Transparent); Set(hud, "previewMotionClock", 5000.0); Call(hud, "PaintQuotaNumber", g, "58", font, 58.0, true); }
                 int maskChanges = 0;
@@ -782,6 +796,22 @@ class CornerHudTests
 
     static void CheckQuotaRunway(Hud hud, string root)
     {
+        var early = new Dictionary<string, object> {{"state", "observing"}, {"method", "weekly_cycle_v4"},
+            {"basis", "cycle"}, {"span_hours", 0.0}, {"reset_hours", 168.0}, {"rate_pct_per_day", 0.0},
+            {"allowance_pct_per_day", 14.3}, {"provisional", true}};
+        var fresh = QuotaRunwayDisplay.Read(early, true, false);
+        early["consumed_since_reset_percent"] = 5.0; early["rate_pct_per_day"] = 20.7;
+        var actualUse = QuotaRunwayDisplay.Read(early, true, false);
+        Check(actualUse.Consumed == 5 && actualUse.RatePerDay == 20.7,
+            "actual consumed quota remains five percent independently of the internal per-day projection");
+        early["rate_pct_per_day"] = 0.0;
+        Check(fresh.RatePerDay == 0 && fresh.Text == "新周期" && fresh.AllowancePerDay == 14.3,
+            "fresh full quota immediately shows the new cycle and zero measured consumption");
+        early["state"] = "through_reset"; early["span_hours"] = 5.0; early["rate_pct_per_day"] = 9.6;
+        early["runway_fraction"] = 1.0; early["gap_hours"] = 0.0;
+        fresh = QuotaRunwayDisplay.Read(early, true, false);
+        Check(fresh.HasTimeline && fresh.RatePerDay == 9.6 && fresh.Provisional && fresh.Text == "至周重置",
+            "early real use provides a qualified estimate without a six-hour frozen blank");
         var forecast = new Dictionary<string, object> {{"state", "estimated"}, {"method", "weekly_cycle_v3"},
             {"basis", "cycle"}, {"span_hours", 24.0}, {"hours", 35.0}, {"reset_hours", 144.0},
             {"runway_fraction", .2398}, {"gap_hours", 109.0}, {"rate_pct_per_day", 41.0},
@@ -992,7 +1022,7 @@ class CornerHudTests
         Set(hud, "previewMotionClock", 132001.0);
         Call(hud, "CheckMemoryPressure");
         Check(!liveGuard.Reduced && (bool)Field(hud, "motionAllowed") &&
-            ((System.Windows.Forms.Timer)Field(hud, "ticker")).Interval == 150 &&
+            ((System.Windows.Forms.Timer)Field(hud, "ticker")).Interval == 100 &&
             ((System.Windows.Forms.Timer)Field(hud, "motionTicker")).Enabled,
             "recovery restores the user's motion preference and normal refresh rate");
         Set(hud, "previewMotionClock", null);
@@ -1360,6 +1390,62 @@ class CornerHudTests
             {"history", Enumerable.Range(0, 12).Select(i => new Dictionary<string, object> {
                 {"at_ms", now - (11 - i) * 30000}, {"state", "ok"}, {"delay_ms", delay + (i % 4) * 34}}).ToArray()}};
     }
+    static void SaveRealtimeAnimation(Hud hud, string root)
+    {
+        var fixture = (Dictionary<string, object>)Field(hud, "data");
+        var metrics = Json.Object(fixture, "metrics");
+        var quota = Json.Object(fixture, "account_quota");
+        var weekly = Json.List(quota, "windows").First(w => Json.Number(w, "window_minutes") == 10080);
+        var folder = Path.Combine(root, "build", "realtime48-frames"); Directory.CreateDirectory(folder);
+        var oldPreference = Field(hud, "nextMotionPreference");
+        var oldMotion = Field(hud, "motionAllowed");
+        Set(hud, "nextMotionPreference", double.MaxValue);
+        Set(hud, "motionAllowed", true);
+        for (int i = 0; i < 150; i++)
+        {
+            double now = (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+            double rate = i < 25 ? 24.6 : i < 50 ? 48.2 : i < 75 ? 89.7 : i < 100 ? 132.5 : i < 125 ? 67.4 : 42.8;
+            fixture["updated_at_ms"] = now; metrics["stage"] = "generating"; metrics["turn_active"] = true;
+            metrics["live_speed"] = SpeedFixture(now, rate, .85);
+            quota["state"] = "ok"; quota["updated_at_ms"] = now;
+            weekly["remaining_percent"] = i < 50 ? 3.0 : i < 100 ? 100.0 : 99.0;
+            weekly["resets_at"] = now / 1000 + 7 * 86400 - (i >= 100 ? 3600 : 0);
+            quota["runway"] = new Dictionary<string, object> {{"method", "weekly_cycle_v4"}, {"state", "observing"},
+                {"basis", "cycle"}, {"span_hours", i >= 100 ? 1.0 : 0.0}, {"rate_pct_per_day", i >= 100 ? 24.0 : 0.0},
+                {"allowance_pct_per_day", 14.3}, {"reset_hours", 168.0}, {"provisional", true},
+                {"calculated_at_ms", now}, {"today", TodayFixture(now, i < 50 ? -2.1 : i < 100 ? 8.4 : 7.4)}};
+            var runway = Json.Object(quota, "runway");
+            runway["consumed_since_reset_percent"] = 100.0 - (double)weekly["remaining_percent"];
+            if (i < 50)
+            {
+                weekly["resets_at"] = now / 1000 + 3 * 3600;
+                runway["state"] = "through_reset"; runway["span_hours"] = 165.0;
+                runway["reset_hours"] = 3.0; runway["rate_pct_per_day"] = 97.0 * 24 / 165;
+                runway["allowance_pct_per_day"] = 24.0; runway["runway_fraction"] = 1.0;
+                runway["gap_hours"] = 0.0; runway["provisional"] = false;
+            }
+            else if (i >= 100)
+            {
+                runway["state"] = "estimated"; runway["reset_hours"] = 167.0; runway["hours"] = 99.0;
+                runway["runway_fraction"] = 99.0 / 167; runway["gap_hours"] = 68.0;
+                runway["allowance_pct_per_day"] = 99.0 * 24 / 167;
+            }
+            Set(hud, "previewMotionClock", 200000.0 + i * 40);
+            Call(hud, "UpdateMetrics");
+            SavePreview(hud, Path.Combine(folder, i.ToString("000") + ".png"));
+            if (i == 32)
+            {
+                var surge = (SpeedSurge)Field(hud, "speedSurge");
+                Check(surge.Started == 201000 && Math.Abs(surge.Gain - 23.6) < .001,
+                    "rendered acceleration comes from the live 24.6 to 48.2 tok/s transition");
+            }
+        }
+        Check(((ReadoutTransition)Field(hud, "speedDigits")).Text == "42.8", "animated live headline follows the final current speed, not the static reference average");
+        Set(hud, "nextMotionPreference", oldPreference);
+        Set(hud, "motionAllowed", oldMotion);
+        Set(hud, "previewMotionClock", null);
+    }
+
     static void SavePreview(Hud hud, string path)
     {
         using (var bitmap = new Bitmap(hud.Width, hud.Height))

@@ -71,11 +71,13 @@ class ForecastTests(unittest.TestCase):
         self.assertEqual(value['rate_pct_per_day'], 20)
         self.assertEqual(value['hours'], 72)
 
-    def test_estimate_is_held_for_ten_minutes_unless_balance_falls_five_points(self):
+    def test_each_balance_change_updates_forecast_without_ten_minute_freeze(self):
         first = self.forecast.observe(weekly(60, self.reset), self.now)
         second = self.forecast.observe(weekly(59, self.reset), self.now + 60)
-        self.assertEqual({k: v for k, v in second.items() if k != 'today'},
-                         {k: v for k, v in first.items() if k != 'today'})
+        self.assertEqual(second['remaining_at_publish'], 59)
+        self.assertEqual(second['calculated_at_ms'], (self.now + 60) * 1000)
+        self.assertGreater(second['rate_pct_per_day'], first['rate_pct_per_day'])
+        self.assertLess(second['hours'], first['hours'])
         urgent = self.forecast.observe(weekly(54, self.reset), self.now + 120)
         self.assertEqual(urgent['remaining_at_publish'], 54)
         self.assertGreater(urgent['rate_pct_per_day'], first['rate_pct_per_day'])
@@ -84,7 +86,7 @@ class ForecastTests(unittest.TestCase):
     def test_small_changes_hold_one_coherent_pace_for_numbers_and_timeline(self):
         first = self.forecast.observe(weekly(60, self.reset), self.now)
         later = self.forecast.observe(weekly(60, self.reset), self.now + 601)
-        self.assertEqual(later['rate_pct_per_day'], first['rate_pct_per_day'])
+        self.assertLess(later['rate_pct_per_day'], first['rate_pct_per_day'])
         expected_hours = 60 * 24 / later['rate_pct_per_day']
         actual_reset_hours = (self.reset - self.now - 601) / 3600
         self.assertAlmostEqual(later['runway_fraction'], expected_hours / actual_reset_hours)
@@ -118,12 +120,14 @@ class ForecastTests(unittest.TestCase):
 
     def test_early_cycle_and_minimal_consumption_remain_neutral(self):
         near_start = self.forecast.observe(weekly(90, self.now + 7 * 86400 - 3600), self.now)
-        self.assertEqual(near_start['state'], 'observing')
+        self.assertEqual(near_start['state'], 'estimated')
+        self.assertTrue(near_start['provisional'])
+        self.assertEqual(near_start['rate_pct_per_day'], 240)
         self.assertEqual(near_start['baseline_pct_per_day'], 14.3)
         self.assertIsNotNone(near_start['allowance_pct_per_day'])
         no_usage = QuotaForecast(self.root).observe(weekly(100, self.reset), self.now)
         self.assertEqual(no_usage['state'], 'observing')
-        self.assertNotIn('rate_pct_per_day', no_usage)
+        self.assertEqual(no_usage['rate_pct_per_day'], 0)
 
     def test_zero_balance_is_immediate_and_does_not_invent_a_pace(self):
         value = self.forecast.observe(weekly(0, self.reset), self.now)
@@ -172,7 +176,7 @@ class ForecastTests(unittest.TestCase):
                 'rate_pct_per_hour': 1.9}, 'published_at': self.now - 60}))
         upgraded = QuotaForecast(self.root / 'home', self.path)
         result = upgraded.observe(weekly(60, self.reset), self.now)
-        self.assertEqual(result['method'], 'weekly_cycle_v3')
+        self.assertEqual(result['method'], 'weekly_cycle_v4')
         self.assertEqual(result['hours'], 72)
         self.assertEqual(result['rate_pct_per_day'], 20)
         stored = json.loads(self.path.read_text())
@@ -185,7 +189,10 @@ class ForecastTests(unittest.TestCase):
     def test_restart_holds_a_valid_new_forecast_without_private_data(self):
         first = self.forecast.observe(weekly(60, self.reset), self.now)
         resumed = QuotaForecast(self.root / 'home', self.path)
-        self.assertEqual(resumed.observe(weekly(60, self.reset), self.now + 60), first)
+        later = resumed.observe(weekly(60, self.reset), self.now + 60)
+        self.assertEqual(later['today'], first['today'])
+        self.assertEqual(later['calculated_at_ms'], (self.now + 60) * 1000)
+        self.assertLess(later['rate_pct_per_day'], first['rate_pct_per_day'])
         stored = json.loads(self.path.read_text())
         self.assertEqual(set(stored), {'version', 'reset', 'samples', 'published', 'published_at', 'refill_anchor', 'daily_budget'})
         self.assertNotIn('thread_id', self.path.read_text())
@@ -268,7 +275,7 @@ class TodayBudgetTests(unittest.TestCase):
     def test_no_refill_from_passing_time_or_held_weekly_forecast(self):
         first = self.observe(60)
         later = self.observe(59, 1 / 60)
-        self.assertEqual(later['rate_pct_per_day'], first['rate_pct_per_day'])
+        self.assertGreater(later['rate_pct_per_day'], first['rate_pct_per_day'])
         self.assertEqual(later['today']['remaining_percent'], 11)
         self.assertEqual(self.observe(59, 12)['today']['remaining_percent'], 11)
 

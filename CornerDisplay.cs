@@ -92,7 +92,7 @@ namespace CodexTokenHud
     internal sealed class TodayQuotaDisplay
     {
         internal string State = "unavailable", Text = "等待额度", Label = "今日建议余量";
-        internal double? Remaining;
+        internal double? Remaining, Spent;
         internal bool Cached;
         internal bool OverBudget { get { return Remaining.HasValue && Remaining.Value < 0; } }
 
@@ -119,7 +119,7 @@ namespace CodexTokenHud
                 start > nowMs || end - start < 20 * 3600000 || end - start > 27 * 3600000 ||
                 anchor < start || anchor > nowMs + 30000 || until <= anchor || until > end || nowMs >= until ||
                 (amount < 0 ? state != "over_budget" : amount > 0 ? state != "ok" : state != "spent")) return result;
-            result.Remaining = amount; result.Cached = cached;
+            result.Remaining = amount; result.Spent = spent; result.Cached = cached;
             result.State = cached ? "cached" : state;
             result.Label = cached ? (result.OverBudget ? "今日超额·暂存" : "今日建议·暂存") :
                 result.OverBudget ? "今日余量·超额" : "今日建议余量";
@@ -134,8 +134,8 @@ namespace CodexTokenHud
     {
         internal string State = "observing", Text = "观察中", Basis = "近期观察中";
         internal string ForecastState = "observing";
-        internal double? Hours, ResetHours, Fraction, GapHours, RatePerDay, AllowancePerDay, BaselinePerDay;
-        internal bool HasTimeline, GapUnder15Minutes;
+        internal double? Hours, ResetHours, Fraction, GapHours, RatePerDay, AllowancePerDay, BaselinePerDay, Consumed;
+        internal bool HasTimeline, GapUnder15Minutes, Provisional;
 
         internal static double? Number(Dictionary<string, object> value, string key)
         {
@@ -171,17 +171,26 @@ namespace CodexTokenHud
             if (baseline.HasValue && baseline.Value > 0 && baseline.Value <= 100) result.BaselinePerDay = baseline;
             if (allowance.HasValue && allowance.Value >= 0 && allowance.Value <= 10000) result.AllowancePerDay = allowance;
             result.ForecastState = state;
+            var consumed = Number(value, "consumed_since_reset_percent");
+            if (consumed.HasValue && consumed >= 0 && consumed <= 100) result.Consumed = consumed;
+            result.Provisional = Json.Get(value, "provisional") is bool && (bool)Json.Get(value, "provisional");
+            double? liveRate = Number(value, "rate_pct_per_day");
+            if (Json.Text(value, "method") == "weekly_cycle_v4" && liveRate.HasValue && liveRate >= 0 && liveRate <= 100000)
+                result.RatePerDay = liveRate;
+            if (state == "observing" && Json.Text(value, "method") == "weekly_cycle_v4")
+            { result.Text = liveRate == 0 ? "新周期" : "积累样本"; result.Basis = "初期均耗"; }
             if (state == "exhausted")
             { result.State = cached ? "cached" : state; result.Text = "已耗尽"; result.Basis = cached ? "上次额度" : "当前额度"; result.HasTimeline = result.ResetHours.HasValue; return result; }
             if (state != "estimated" && state != "through_reset") return cached ? WaitingForSync() : result;
             double? span = Number(value, "span_hours");
             string basis = Json.Text(value, "basis");
-            if (Json.Text(value, "method") != "weekly_cycle_v3" || (basis != "cycle" && basis != "after_refill") ||
-                !span.HasValue || span.Value < 6 || span.Value > 168.01) return cached ? WaitingForSync() : result;
+            bool realtime = Json.Text(value, "method") == "weekly_cycle_v4";
+            if ((!realtime && Json.Text(value, "method") != "weekly_cycle_v3") || (basis != "cycle" && basis != "after_refill") ||
+                !span.HasValue || span.Value < (realtime ? .25 : 6) || span.Value > 168.01) return cached ? WaitingForSync() : result;
             result.Basis = cached ? "上次估算" : basis == "cycle" ? "周期均耗" : "补额后均耗";
             double? fraction = Number(value, "runway_fraction"), gap = Number(value, "gap_hours"), rate = Number(value, "rate_pct_per_day");
             if (result.ResetHours.HasValue && fraction.HasValue && fraction.Value >= 0 && fraction.Value <= 1 &&
-                gap.HasValue && gap.Value >= 0 && gap.Value <= 168 && rate.HasValue && rate.Value > 0 && rate.Value <= 400 &&
+                gap.HasValue && gap.Value >= 0 && gap.Value <= 168 && rate.HasValue && rate.Value > 0 && rate.Value <= (realtime ? 100000 : 400) &&
                 (state == "estimated" ? fraction.Value < 1 : fraction.Value == 1 && gap.Value == 0))
             { result.Fraction = fraction; result.GapHours = gap; result.RatePerDay = rate; result.HasTimeline = true;
               result.GapUnder15Minutes = Json.Get(value, "gap_under_15_minutes") is bool && (bool)Json.Get(value, "gap_under_15_minutes"); }
@@ -332,6 +341,8 @@ namespace CodexTokenHud
             if (!configuration.CornerMode) return;
             motionTicker.Interval = SystemInformation.TerminalServerSession ? 100 : 40;
             motionTicker.Tick += delegate {
+                motionTicker.Interval = SystemInformation.TerminalServerSession ? 100 :
+                    ReadoutsMoving(MotionMs) ? 16 : 40;
                 if (!stopping && Visible && motionAllowed && !menu.Visible) Invalidate();
             };
             motionTicker.Start();
@@ -469,7 +480,7 @@ namespace CodexTokenHud
             else
             {
                 DoubleBuffered = true;
-                ticker.Interval = 150;
+                ticker.Interval = 100;
                 hoverTicker.Interval = 60;
                 motionAllowed = ResolveMotion(configuration.CornerMotion, systemMotionAllowed);
                 nextMotionPreference = 0;
@@ -811,6 +822,21 @@ namespace CodexTokenHud
                 Color.FromArgb(20, 175, 194, 217), 90f))
             using (var pen = new Pen(rim))
             { g.FillPath(fill, path); g.DrawPath(pen, path); }
+            if (!renderMemory.Reduced)
+            {
+                // Quiet inner bevel and a narrow top reflection give the common
+                // graphite material depth without blurring or covering any text.
+                var inset = new RectangleF(bounds.X + 1.5f, bounds.Y + 1.5f, bounds.Width - 3, bounds.Height - 3);
+                using (var path = RoundedCard(inset, 16.5f))
+                using (var bevel = new LinearGradientBrush(inset, Color.FromArgb(19, 209, 224, 239), Color.FromArgb(35, 4, 8, 14), 90f))
+                using (var pen = new Pen(bevel)) g.DrawPath(pen, path);
+                using (var light = new LinearGradientBrush(new RectangleF(bounds.Left + 24, bounds.Top, bounds.Width - 48, 2),
+                    Color.FromArgb(0, Ink), Color.FromArgb(0, Ink), 0f))
+                {
+                    light.InterpolationColors = new ColorBlend { Colors = new[] {Color.FromArgb(0, Ink), Color.FromArgb(34, Ink), Color.FromArgb(0, Ink)}, Positions = new[] {0f,.45f,1f}};
+                    using (var pen = new Pen(light)) g.DrawLine(pen, bounds.Left + 24, bounds.Top + .8f, bounds.Right - 24, bounds.Top + .8f);
+                }
+            }
             // Tinted edges are event feedback. Healthy cards share one quiet material.
             if (emphasis > 0)
                 SpecularRim(g, bounds, 18, accent, bounds.X / 120 + bounds.Y / 200, Math.Min(125, emphasis + 32));
@@ -975,23 +1001,59 @@ namespace CodexTokenHud
         {
             float valueWidth;
             using (var format = StringFormat.GenericTypographic) valueWidth = g.MeasureString(value, hero, 190, format).Width;
-            var numberBounds = new RectangleF(30, 295, 168, 55);
-            var unitBounds = new RectangleF(Math.Min(173, 35 + valueWidth), 318, 24, 25);
+            var numberBounds = new RectangleF(42, 291, 150, 55);
+            var unitBounds = new RectangleF(Math.Min(166, 47 + valueWidth), 313, 24, 25);
             if (hasWindow && !quotaCached && remaining > 0)
             {
                 double phase = QuotaRainbowPhase();
                 using (var spectrum = QuotaSpectrumBrush(new RectangleF(30, 295, Math.Max(80, unitBounds.Right - 30), 55),
                     phase, QuotaResetLink() == "forecast", 255))
                 {
-                    QuotaBrushText(g, value, hero, spectrum, numberBounds);
+                    MovingReadout(g, quotaDigits, value, hero, numberBounds, StringAlignment.Near, "weekly", delegate(string part, RectangleF box, double alpha) {
+                        using (var glyphBrush = QuotaSpectrumBrush(new RectangleF(30, 295, Math.Max(80, unitBounds.Right - 30), 55),
+                            phase, QuotaResetLink() == "forecast", (int)(255 * alpha))) QuotaBrushText(g, part, hero, glyphBrush, box);
+                    });
                     QuotaBrushText(g, "%", cornerValueFont, spectrum, unitBounds);
                 }
             }
             else
             {
-                CornerText(g, value, hero, !hasWindow || quotaCached ? Muted : remaining <= 0 ? Rose : Ink, numberBounds, false);
+                // Expiry/exhaustion is authoritative immediately; never animate a
+                // positive old balance through an unavailable or empty state.
+                quotaDigits.Set(value, "weekly", MotionMs, false);
+                MovingText(g, quotaDigits, value, hero, !hasWindow || quotaCached ? Muted : remaining <= 0 ? Rose : Ink,
+                    numberBounds, StringAlignment.Near, "weekly");
                 if (hasWindow) CornerText(g, "%", cornerValueFont, Muted, unitBounds, false);
             }
+        }
+
+        private void PaintQuotaBattery(Graphics g, double? percent)
+        {
+            // The cell and its charge share the number's 0–100 scale. The
+            // independently projected dates and hatched gap live below the cell.
+            var body = new RectangleF(35, 298, 147, 44);
+            var chamber = new RectangleF(38, 301, 141, 38);
+            bool linked = percent.HasValue && QuotaResetLink() == "forecast";
+            Color charge = quotaCached || !percent.HasValue ? Muted : percent <= 10 ? Amber : Mint;
+            Panel(g, body, Color.FromArgb(205, 12, 18, 25), Color.FromArgb(110, charge), 8);
+            using (var terminal = new SolidBrush(Color.FromArgb(145, charge)))
+                g.FillRectangle(terminal, 184, 312, 3, 16);
+            if (!percent.HasValue || percent <= 0) return;
+            var state = g.Save();
+            try
+            {
+                using (var shape = RoundedCard(chamber, 5)) g.SetClip(shape, CombineMode.Intersect);
+                float width = chamber.Width * (float)(percent.Value / 100);
+                using (Brush fill = linked ? (Brush)QuotaSpectrumBrush(chamber, QuotaRainbowPhase(), true, 86) :
+                    new LinearGradientBrush(chamber, Color.FromArgb(37, charge), Color.FromArgb(74, charge), 0f))
+                    g.FillRectangle(fill, chamber.X, chamber.Y, width, chamber.Height);
+                using (Brush strip = linked ? (Brush)QuotaSpectrumBrush(chamber, QuotaRainbowPhase(), true, 240) :
+                    new SolidBrush(Color.FromArgb(205, charge)))
+                    g.FillRectangle(strip, chamber.X, chamber.Bottom - 3, width, 3);
+                using (var marker = new Pen(Color.FromArgb(115, charge)))
+                    if (width >= 1 && percent < 100) g.DrawLine(marker, chamber.X+width, chamber.Y, chamber.X+width, chamber.Bottom);
+            }
+            finally { g.Restore(state); }
         }
 
         private void PaintQuotaResetGlow(Graphics g, RectangleF bounds, double clock)
@@ -1055,18 +1117,21 @@ namespace CodexTokenHud
         private void PaintCornerQuota(Graphics g)
         {
             var window = quotaWindows.FirstOrDefault(w => Json.Number(w, "window_minutes") == 10080);
-            double remaining = Math.Max(0, Math.Min(100, Json.Number(window, "remaining_percent") ?? 0));
+            double? balance = QuotaRunwayDisplay.Number(window, "remaining_percent");
+            if (balance < 0 || balance > 100) balance = null;
+            double remaining = balance.GetValueOrDefault();
             Color tone = QuotaRunwayTone();
             var headingBounds = new RectangleF(36, 273, 157, 22);
             if (QuotaResetLink() == "forecast")
                 using (var heading = QuotaSpectrumBrush(headingBounds, QuotaRainbowPhase(), false, 255))
                     QuotaBrushText(g, QuotaHeading(), cornerTitleFont, heading, headingBounds);
             else CornerText(g, QuotaHeading(), cornerTitleFont, Ink, headingBounds, false);
-            CornerText(g, quotaRunway.State == "cached" ? "上次预计可用" : "预计可用", cornerSmallFont, Muted,
+            CornerText(g, quotaRunway.State == "cached" ? "上次预计可用" : quotaRunway.Provisional ? "预计可用·初估" : "预计可用", cornerSmallFont, Muted,
                 new RectangleF(205, 273, 159, 22), true);
-            string value = window == null ? "—" : remaining.ToString("0.#");
+            string value = balance.HasValue ? remaining.ToString("0.#") : "—";
             Font hero = value.Length > 4 ? cornerQuotaFont : cornerHeroFont;
-            PaintQuotaNumber(g, value, hero, remaining, window != null);
+            PaintQuotaBattery(g, balance);
+            PaintQuotaNumber(g, value, hero, remaining, balance.HasValue);
             CornerText(g, quotaRunway.Text, cornerRunwayFont, tone, new RectangleF(198, 298, 166, 35), true);
             string ending = quotaScale.Projected && !quotaScale.ThroughReset ? quotaScale.EndLabel : "";
             CornerText(g, ending, cornerMicroFont, quotaScale.Cached ? Muted : DebtMetal, new RectangleF(192, 327, 172, 18), true);
@@ -1078,9 +1143,11 @@ namespace CodexTokenHud
                 quotaToday.OverBudget ? DebtText : quotaToday.Remaining == 0 ? Orange : Mint;
             if (advice.EndsWith("%")) PaintQuotaMetric(g, advice.Substring(0, advice.Length - 1), "%", 84, todayTone);
             else CornerText(g, advice, cornerRadarFont, todayTone, new RectangleF(32, 425, 104, 24), StringAlignment.Center);
-            PaintDailyQuota(g, quotaRunway.State == "cached" ? "上次均耗" : quotaRunway.Basis == "补额后均耗" ? "补额后均耗" : "周期均耗",
-                quotaRunway.RatePerDay, 148, Ink);
-            PaintDailyQuota(g, quotaCached ? "上次每日可用" : "至重置可用", quotaRunway.AllowancePerDay, 264, tone);
+            CornerText(g, quotaCached ? "本轮已用·暂存" : "本轮已用", cornerMicroFont, Muted,
+                new RectangleF(148, 406, 104, 18), StringAlignment.Center);
+            PaintQuotaMetric(g, quotaRunway.Consumed.HasValue ? quotaRunway.Consumed.Value.ToString("0.#") : "—",
+                quotaRunway.Consumed.HasValue ? "%" : "", 200, quotaCached ? Muted : Ink);
+            PaintDailyQuota(g, quotaCached ? "每日可用·暂存" : "每日可用", quotaRunway.AllowancePerDay, 264, tone);
         }
 
         private void PaintDailyQuota(Graphics g, string label, double? value, float x, Color color)
@@ -1098,7 +1165,9 @@ namespace CodexTokenHud
                 float unitWidth = unit.Length == 0 ? 0 : g.MeasureString(unit, cornerMicroFont, 100, format).Width;
                 float gap = unit.Length == 0 ? 0 : 3;
                 float left = center - (numberWidth + gap + unitWidth) / 2;
-                CornerText(g, number, cornerValueFont, color, new RectangleF(left, 425, numberWidth + 1, 24), false);
+                var transition = center < 140 ? todayDigits : center < 250 ? cycleDigits : allowanceDigits;
+                MovingText(g, transition, number, cornerValueFont, color, new RectangleF(left, 425, numberWidth + 1, 24),
+                    StringAlignment.Near, "quota-advice");
                 if (unit.Length > 0) CornerText(g, unit, cornerMicroFont, Muted, new RectangleF(left + numberWidth + gap, 429, unitWidth + 1, 18), false);
             }
         }
@@ -1116,6 +1185,20 @@ namespace CodexTokenHud
                 if (urgent) GlowPanel(g, bounds, Rose, .45, motionAllowed ? (1 + Math.Sin(clock / 1050)) / 2 : .35);
             }
             PaintQuotaResetGlow(g, bounds, clock);
+            if (motionAllowed && !renderMemory.Reduced && !quotaCached && QuotaResetLink() == "none")
+            {
+                double receipt = quotaReceipt.Strength(clock);
+                if (receipt > 0)
+                {
+                    Color tone = quotaReceipt.Refilled ? Mint : Blue;
+                    using (var path = RoundedCard(bounds, 18))
+                    using (var pen = new Pen(Color.FromArgb((int)(receipt * (quotaReceipt.Refilled ? 150 : 70)), tone), quotaReceipt.Refilled ? 1.5f : 1))
+                        g.DrawPath(pen, path);
+                    if (quotaReceipt.Refilled)
+                        using (var wash = new LinearGradientBrush(bounds, Color.FromArgb((int)(receipt * 15), Mint), Color.FromArgb(0, Mint), 90f))
+                        using (var path = RoundedCard(bounds, 18)) g.FillPath(wash, path);
+                }
+            }
             using (var divider = new Pen(Color.FromArgb(25, Muted))) g.DrawLine(divider, 36, 402, 364, 402);
             if (quotaToday.OverBudget) PaintTodayDebtSurface(g, clock);
         }
@@ -1329,7 +1412,8 @@ namespace CodexTokenHud
                 if (g.MeasureString(radar.Countdown, dateFont, 1000, format).Width > 184) dateFont = cornerRadarFont;
                 if (g.MeasureString(radar.Countdown, dateFont, 1000, format).Width > 184) dateFont = cornerTitleFont;
             }
-            CornerText(g, radar.Countdown, dateFont, present ? tone : Muted, new RectangleF(180, 475, 184, 30), true);
+            MovingText(g, radarDigits, radar.Countdown, dateFont, present ? tone : Muted,
+                new RectangleF(180, 475, 184, 30), StringAlignment.Far, radar.SignalIdentity + ":" + radar.ResetType);
             string detail = radar.CalendarLabel.Length > 0 ? radar.CalendarLabel : burst ? radarMotion.Notice : radar.Detail;
             // The account reset already has its own label above; this row is public information only.
             if (detail.StartsWith("周重置", StringComparison.Ordinal))
@@ -1363,7 +1447,9 @@ namespace CodexTokenHud
             CornerText(g, status, cornerMicroFont, color, new RectangleF(x + 112, 567, 46, 18), true);
             string value = ok ? Math.Round(delay.Value).ToString() : "—";
             Font numberFont = value.Length > 4 ? cornerValueFont : cornerNumberFont;
-            CornerText(g, value, numberFont, ok ? Ink : color, new RectangleF(x + 13, 586, 98, 31), false);
+            var digits = x < 100 ? aiDigits : generalDigits;
+            if (!ok) digits.Set(value, label, time, false);
+            MovingText(g, digits, value, numberFont, ok ? Ink : color, new RectangleF(x + 13, 586, 98, 31), StringAlignment.Near, label);
             if (ok)
             {
                 float valueWidth;
@@ -1380,7 +1466,9 @@ namespace CodexTokenHud
                 double? ms = Json.Number(history[index], "delay_ms");
                 if (Json.Text(history[index], "state") == "ok" && ms.HasValue && ms.Value > 0 && !double.IsInfinity(ms.Value) && !double.IsNaN(ms.Value))
                 {
-                    float height = (float)(4 + 16 * Math.Min(1500, ms.Value) / 1500);
+                    double grow = !motionAllowed || !recent || i != 11 ? 1 :
+                        1 - Math.Pow(1 - Math.Max(0, Math.Min(1, (time - motion.SampleAt) / 420)), 3);
+                    float height = (float)((4 + 16 * Math.Min(1500, ms.Value) / 1500) * grow);
                     using (var bar = new SolidBrush(Color.FromArgb(150 + i * 8, recent ? DelayColor(ms.Value) : Muted)))
                         g.FillRectangle(bar, bx, 610 - height, 2, height);
                 }
@@ -1411,13 +1499,15 @@ namespace CodexTokenHud
             using (var dot = new SolidBrush(color)) g.FillEllipse(dot, 36, 648, 4, 4);
             if (activity.Active && motionAllowed)
                 using (var halo = new SolidBrush(Color.FromArgb((int)(12 + phase * 25), color))) g.FillEllipse(halo, 32, 644, 12, 12);
-            CornerText(g, activity.Title, cornerTitleFont, activity.Active ? color : Ink, new RectangleF(48, 640, 155, 21), false);
+            MovingText(g, activityLabel, activity.Title, cornerTitleFont, activity.Active ? color : Ink,
+                new RectangleF(48, 640, 155, 21), StringAlignment.Near, activity.SessionId);
             CornerText(g, activity.State == "idle" ? "最近活动" : "距最新活动", cornerMicroFont, Muted, new RectangleF(227, 643, 69, 18), true);
             CornerText(g, activity.ElapsedText, activity.ElapsedText.Length > 5 ? cornerTitleFont : cornerValueFont,
                 activity.Active ? color : Ink, new RectangleF(298, 638, 66, 26), true);
             CornerText(g, "平均响应", cornerMicroFont, Muted, new RectangleF(36, 664, 96, 17), false);
-            CornerText(g, activity.AverageText, cornerValueFont,
-                activity.AverageMs.HasValue ? ResponseColor(activity.AverageMs.Value) : Muted, new RectangleF(35, 681, 108, 25), false);
+            MovingText(g, responseDigits, activity.AverageText, cornerValueFont,
+                activity.AverageMs.HasValue ? ResponseColor(activity.AverageMs.Value) : Muted,
+                new RectangleF(35, 681, 108, 25), StringAlignment.Near, activity.SessionId);
             CornerLayer(g, 220, delegate { PaintResponseHistory(g, time); });
             string detail = activity.Severity > 0 || activity.State == "unknown" ? activity.Detail :
                 activity.CompletedCount > 1 ? "日志估算 · 虚线为平均响应" :

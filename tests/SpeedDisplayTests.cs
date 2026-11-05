@@ -26,8 +26,8 @@ class SpeedDisplayTests
         const double now = 1800000000000;
         var data = Fixture(now);
         var view = SpeedDisplay.Read(data, "current", now);
-        Check(view.Ready && !view.Estimated && view.Value == "42.0" && view.Mode == "近期均速" && view.LiveRate == 40,
-            "headline uses qualified measured average while retaining the live activity window");
+        Check(view.Ready && view.Estimated && view.Value == "40.0" && view.Mode == "实时估算" && view.LiveRate == 40,
+            "headline follows the current live window rather than the slower ten-response average");
         Check(view.Recent == 42 && view.Cache == 99.5 && view.ConfirmedOutput == 1200, "reference speed and confirmed counters remain separate");
         Check(!SpeedDisplay.Read(data, "other", now).Ready, "speed never crosses the selected conversation title");
         data["updated_at_ms"] = now - 6001;
@@ -50,21 +50,38 @@ class SpeedDisplayTests
         frame["state"] = "tools"; frame["rate"] = 0.0;
         Json.Object(data, "metrics")["stage"] = "tools";
         view = SpeedDisplay.Read(data, "current", now);
-        Check(view.Ready && view.Value == "42.0" && view.Mode == "近期均速" && view.LiveRate == 0 && view.Phase == "工具中",
+        Check(view.Ready && view.Value == "39.0" && view.Mode == "工具中·保留" && view.LiveRate == 0 && view.Phase == "工具中",
             "tool pause retains the measured headline while the live window can reach zero");
         frame["state"] = "idle"; Json.Object(data, "metrics")["stage"] = "idle";
         view = SpeedDisplay.Read(data, "current", now);
-        Check(view.Ready && view.Value == "42.0" && view.Phase == "待机", "completed task retains a clearly labeled measured average");
+        Check(view.Ready && view.Value == "39.0" && view.Mode == "上次实测" && view.Phase == "待机", "completed task retains the last real measurement");
         Json.Object(data, "metrics")["stage"] = "generating";
         Json.Object(data, "metrics")["turn_active"] = false;
         Check(SpeedDisplay.Read(data, "current", now).Phase == "待机", "completed lifecycle cannot show a generation animation");
-        frame["steady_rate"] = null; frame["recent_rate"] = null;
+        frame["steady_rate"] = null; frame["recent_rate"] = null; frame["last_response_rate"] = null;
         view = SpeedDisplay.Read(data, "current", now);
         Check(!view.Ready && view.Value == "—", "no response baseline displays a dash instead of a fabricated zero");
         data["range"] = new Dictionary<string, object> {{"thread_id", "t"}, {"rate", 18.5}, {"cache_percent", 80.0}, {"output_tokens", 5000}};
         view = SpeedDisplay.Read(data, "current", now);
         Check(view.State == "range" && view.Value == "18.5" && view.Mode == "区间均速" && !view.Estimated, "confirmed ranges retain their qualified display mode");
         Check(SpeedDisplay.Format(12345) == "12.3k" && SpeedDisplay.Tokens(1200) == "1.2k", "large values remain within the instrument width");
+        var rolling = new ReadoutTransition();
+        rolling.Set("32.4", "a", 1000, true);
+        Check(!rolling.Moving(1000), "initial values appear immediately without replaying a fake count-up");
+        rolling.Set("58.7", "a", 1100, true);
+        Check(rolling.Moving(1100) && rolling.Text == "58.7" && rolling.Previous == "32.4" && rolling.Direction == 1,
+            "new actual digits roll upward in place");
+        Check(rolling.Progress(1230) > .5 && rolling.Progress(1360) == 1 && !rolling.Moving(1360),
+            "digit roll decelerates and finishes within 260 ms");
+        rolling.Set("54.1", "a", 1200, true);
+        Check(rolling.Text == "54.1" && rolling.Direction == -1 && rolling.ChangedAt == 1200,
+            "rapid updates replace an unfinished transition instead of queueing stale numbers");
+        rolling.Set("54.1", "a", 1250, true);
+        Check(rolling.ChangedAt == 1200, "identical snapshots never restart the animation");
+        rolling.Set("87.0", "b", 1300, true);
+        Check(!rolling.Moving(1300), "switching conversation or model cannot animate unrelated old values");
+        rolling.Set("−2.1", "b", 1400, false);
+        Check(!rolling.Moving(1400) && rolling.Text == "−2.1", "reduced motion shows the signed final number immediately");
         var heatType = typeof(Hud).GetNestedType("HeatMotion", BindingFlags.NonPublic);
         var heat = Activator.CreateInstance(heatType, true);
         var update = heatType.GetMethod("Update", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -82,8 +99,9 @@ class SpeedDisplayTests
         var colorMethod = typeof(Hud).GetMethod("SpeedColor", BindingFlags.NonPublic | BindingFlags.Static);
         var colors = new[] { 8.0, 40.0, 90.0, 180.0 }.Select(rate => (Color)colorMethod.Invoke(null, new object[] {(double?)rate})).ToArray();
         Check(colors.Select(c => c.ToArgb()).Distinct().Count() == 4 && colors[0].B > colors[0].R && colors[3].R > colors[3].B,
-            "speed colors progress from cool blue/cyan to green, gold and orange as measured rate rises");
-        foreach (double boundary in new[] {25.0, 60.0, 120.0, 200.0})
+            "speed colors progress from cool aqua through violet and rose to gold as measured rate rises");
+        Check(colors[2].R > colors[2].G && colors[2].B > colors[2].G, "middle-high speed has a distinct orchid hue");
+        foreach (double boundary in new[] {16.0, 32.0, 55.0, 85.0, 125.0, 165.0, 200.0})
         {
             var before = (Color)colorMethod.Invoke(null, new object[] {(double?)(boundary - .01)});
             var after = (Color)colorMethod.Invoke(null, new object[] {(double?)(boundary + .01)});
@@ -116,6 +134,50 @@ class SpeedDisplayTests
         Check(resumedTravel > 0 && resumedTravel <= .1251, "resuming after a long pause cannot fast-forward the rainbow");
         phase = flow.Phase; flow.Update(500, 180, true, true); flow.Update(double.NaN, 180, true, true);
         Check(flow.Phase == phase && !double.IsNaN(flow.Phase), "clock rollback and invalid clocks cannot corrupt the color phase");
+        var orbit = new InstrumentFlow(); orbit.Update(1000, .2, true, true, "a"); orbit.Update(1040, .2, true, true, "a");
+        double orbitPhase = orbit.Phase, orbitVelocity = orbit.Velocity;
+        orbit.Update(1040, .9, true, true, "a");
+        Check(orbit.Phase == orbitPhase && orbit.Velocity == orbitVelocity, "speed changes cannot teleport the luminous orbit");
+        orbit.Update(1080, .9, true, true, "a");
+        Check(orbit.Phase > orbitPhase && orbit.Velocity > orbitVelocity && orbit.Energy < .9,
+            "instrument energy and angular velocity ease toward the new activity");
+        orbitPhase = orbit.Phase; orbit.Update(30000, .9, true, true, "a");
+        Check((orbit.Phase - orbitPhase + 1) % 1 < .065, "resume caps orbital travel instead of fast-forwarding a pause");
+        orbitPhase = orbit.Phase; orbit.Update(31000, .9, true, false, "a");
+        Check(orbit.Phase == orbitPhase, "static and memory-protected frames freeze orbital phase");
+        orbit.Update(32000, .9, false, false, "a");
+        Check(orbit.Energy == 0, "tool pause cannot masquerade as active generation energy");
+        var receipt = new QuotaReceipt(); receipt.Observe(95, 200000, 1000, 1000, true);
+        Check(receipt.Strength(1200) == 0, "initial quota snapshot never announces an old refill");
+        receipt.Observe(95, 200000, 2000, 2000, true);
+        Check(receipt.Strength(2200) == 0, "unchanged quota polling cannot replay a data receipt");
+        receipt.Observe(94, 200000, 3000, 3000, true);
+        Check(receipt.Strength(3300) > 0 && !receipt.Refilled && receipt.Delta == -1, "real debit receives a quiet update receipt");
+        receipt.Observe(100, 800000, 4000, 4000, true);
+        Check(receipt.Refilled && receipt.Strength(4500) > 0 && receipt.Delta == 6, "actual account refill has a distinct bounded receipt");
+        receipt.Observe(2, 200000, 3500, 4600, true);
+        Check(receipt.Refilled && receipt.Delta == 6, "late snapshots cannot overwrite the refill animation identity");
+        receipt.Observe(100, 800000, 5000, 5000, false);
+        Check(receipt.Strength(5100) == 0, "stale quota immediately cancels live receipts");
+        var correction = new QuotaReceipt(); correction.Observe(94, 200000, 1000, 1000, true);
+        correction.Observe(95, 200000, 2000, 2000, true);
+        Check(!correction.Refilled, "one-point balance correction cannot announce an account refill");
+        correction.Observe(99, 200000, 3000, 3000, true);
+        correction.Observe(100, 200000, 4000, 4000, true);
+        Check(correction.Refilled, "a confirmed return to full balance still receives refill feedback");
+        var surge = new SpeedSurge();
+        surge.Observe(100, 20, true, "a");
+        surge.Observe(300, 22, true, "a");
+        Check(surge.Started < 0, "entry and small fluctuations stay quiet");
+        surge.Observe(600, 28, true, "a");
+        Check(surge.Started == 600 && surge.Gain == 8, "a multi-sample acceleration earns one delta from the actual lower reading");
+        for (int tick = 700; tick <= 3500; tick += 100) surge.Observe(tick, 28, true, "a");
+        Check(surge.Started == 600, "holding speed cannot replay a surge");
+        surge.Observe(3600, 160, true, "b");
+        Check(surge.Started < 0, "model/session changes rebase acceleration");
+        surge.Observe(3700, 200, false, "b");
+        surge.Observe(3800, 210, true, "b");
+        Check(surge.Started < 0, "static, protected, tool and idle frames disarm surge feedback");
         Console.WriteLine("Speed display checks passed: " + checks);
     }
 }

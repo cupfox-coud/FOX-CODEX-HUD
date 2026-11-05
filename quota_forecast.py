@@ -14,14 +14,19 @@ from pathlib import Path
 
 WINDOW_MINUTES = 10080
 LOOKBACK_SECONDS = 7 * 86400
-MIN_SPAN_SECONDS = 6 * 3600
-MIN_SPENT_PERCENT = 2.0
-PUBLISH_INTERVAL = 10 * 60
+MIN_SPAN_SECONDS = 15 * 60
+MIN_SPENT_PERCENT = 1.0
 RESET_TOLERANCE = 120
 MAX_SAMPLES = 400
 MAX_HISTORY_BYTES = 128 * 1024
-METHOD = 'weekly_cycle_v3'
+METHOD = 'weekly_cycle_v4'
 BASELINE_PER_DAY = 100.0 / 7.0
+
+
+def _refilled(before, after):
+    # Integer-percent reports may differ by one point between transports.
+    # Corrections must not erase the cycle/daily ledger; a full refill still can.
+    return after > before + 1.0 + 1e-9 or (after == 100 and before < 100)
 
 
 def _day_bounds(now):
@@ -70,6 +75,7 @@ class QuotaForecast:
         self.published_at = 0.0
         self.refill_anchor = None
         self.daily_budget = None
+        self.saved_at = 0.0
         self._load()
 
     def _load(self):
@@ -106,7 +112,7 @@ class QuotaForecast:
                 self.refill_anchor = (float(anchor[0]), float(anchor[1]))
             # Preserve a known discontinuity even when importing an old cache.
             for i in range(1, len(self.samples)):
-                if (self.samples[i][1] > self.samples[i - 1][1] + 0.5 and
+                if (_refilled(self.samples[i - 1][1], self.samples[i][1]) and
                         self.reset - LOOKBACK_SECONDS - RESET_TOLERANCE <= self.samples[i][0] < self.reset and
                         (not self.refill_anchor or self.samples[i][0] > self.refill_anchor[0])):
                     self.refill_anchor = self.samples[i]
@@ -197,7 +203,7 @@ class QuotaForecast:
             self.samples, self.published, self.published_at = [], None, 0.0
         self.samples = [(at, value) for at, value in self.samples
                         if now - LOOKBACK_SECONDS <= at <= now + 5 and 0 <= value <= 100]
-        if self.samples and remaining > self.samples[-1][1] + 0.5:
+        if self.samples and _refilled(self.samples[-1][1], remaining):
             self.samples, self.published, self.published_at = [], None, 0.0
             # A refill or account change breaks the full-cycle assumption.
             self.refill_anchor = (now, remaining)
@@ -219,19 +225,14 @@ class QuotaForecast:
         allowance = round(remaining * 24.0 / reset_hours, 1) if reset_hours >= 0.25 else None
         common = {'method': METHOD, 'reset_hours': _round_hours(reset_hours),
                   'baseline_pct_per_day': round(BASELINE_PER_DAY, 1),
-                  'allowance_pct_per_day': allowance, 'calculated_at_ms': now * 1000}
+                  'allowance_pct_per_day': allowance, 'calculated_at_ms': now * 1000,
+                  'consumed_since_reset_percent': max(0.0, (self.refill_anchor[1] if self.refill_anchor else 100.0) - remaining)}
         if remaining == 0:
             self.published, self.published_at = dict(common, state='exhausted'), now
-            self._save()
-            return dict(self.published, today=today)
-        previous_remaining = self.published.get('remaining_at_publish') if self.published else None
-        substantial_change = _number(previous_remaining) and previous_remaining - remaining >= 5
-        if (self.published and self.published.get('state') in ('estimated', 'through_reset') and
-                0 <= now - self.published_at < PUBLISH_INTERVAL and not substantial_change):
-            if changed or daily_changed:
+            if changed or daily_changed or changed_cycle or now - self.saved_at >= 60:
                 self._save()
+                self.saved_at = now
             return dict(self.published, today=today)
-
         if self.refill_anchor:
             basis = 'after_refill'
             span = max(0.0, now - self.refill_anchor[0])
@@ -240,21 +241,16 @@ class QuotaForecast:
             basis = 'cycle'
             span = max(0.0, WINDOW_MINUTES * 60.0 - (reset - now))
             spent = max(0.0, 100.0 - remaining)
+        common.update(basis=basis, span_hours=min(168.0, span / 3600.0),
+                      remaining_at_publish=remaining, provisional=span < 6 * 3600 or spent < 2)
+        # Current arithmetic is never frozen to make the display look stable.
+        # Confidence qualifies a short sample; presentation owns visual smoothing.
+        if span >= 60 or spent == 0:
+            common['rate_pct_per_day'] = spent * 86400.0 / span if span > 0 else 0.0
         if span < MIN_SPAN_SECONDS or spent < MIN_SPENT_PERCENT:
             result = dict(common, state='observing', basis=basis)
         else:
             rate = spent * 86400.0 / span
-            safe_rate = remaining * 24.0 / reset_hours
-            old = self.published if isinstance(self.published, dict) else {}
-            old_rate = old.get('rate_pct_per_day')
-            # Hold the pace, not just the text, so the rate, timeline and gap
-            # always describe the same estimate. Do not hide a risk transition.
-            if (not substantial_change and old.get('method') == METHOD and old.get('basis') == basis
-                    and _number(old_rate) and old_rate > 0
-                    and (old_rate > safe_rate) == (rate > safe_rate)
-                    and abs(rate - old_rate) < max(0.2, old_rate * 0.05)):
-                rate = old_rate
-            rate = max(0.01, rate)  # Keep the comparison precise at the reset boundary.
             hours = remaining * 24.0 / rate
             rounded_reset = _round_hours(reset_hours)
             rounded_hours = _round_hours(hours)
@@ -267,5 +263,7 @@ class QuotaForecast:
             if result['state'] == 'estimated':
                 result['hours'] = rounded_hours
         self.published, self.published_at = result, now
-        self._save()
+        if changed or daily_changed or changed_cycle or now - self.saved_at >= 60:
+            self._save()
+            self.saved_at = now
         return dict(result, today=today)
