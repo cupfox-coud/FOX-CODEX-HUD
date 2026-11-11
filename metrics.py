@@ -5,6 +5,7 @@ import argparse
 import collections
 from contextlib import closing
 import datetime as dt
+import hashlib
 import json
 import math
 import os
@@ -12,13 +13,14 @@ from pathlib import Path
 import sqlite3
 import sys
 import time
+import unicodedata
 from typing import Any
 
 # In isolated mode, trust only this installed source directory for sibling modules.
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from speed import LiveSpeed, interval as speed_interval
+from speed import LiveSpeed, GlobalSpeed, interval as speed_interval
 
 
 def timestamp_ms(value: str | None) -> float | None:
@@ -47,6 +49,55 @@ def cache_percent(usage: dict) -> float | None:
     if not total or cached > total:
         return None
     return 100 * cached / total
+
+
+class ContextUsage:
+    """Last reported request input, not cumulative billing or a compression threshold.
+
+    Keeps only a numeric sample and the latest explicit compaction event. The
+    window and model always travel with that sample, including zero-delta rows.
+    """
+    def __init__(self):
+        self.sample = None
+        self.compacted_at = None
+
+    @staticmethod
+    def number(value):
+        return value if type(value) in (int, float) and 0 <= value <= 2**53 and math.isfinite(value) else None
+
+    def feed(self, event, model):
+        at = timestamp_ms(event.get("timestamp"))
+        if at is None:
+            return
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict):
+            return
+        if event.get("type") == "compacted" or (
+                event.get("type") == "event_msg" and payload.get("type") == "context_compacted"):
+            self.compacted_at = max(self.compacted_at or 0, at)
+            return
+        if event.get("type") != "event_msg" or payload.get("type") != "token_count":
+            return
+        info = payload.get("info")
+        if not isinstance(info, dict) or not isinstance(info.get("last_token_usage"), dict):
+            return
+        if self.sample and at < self.sample["sample_at_ms"]:
+            return
+        used = self.number(info["last_token_usage"].get("input_tokens"))
+        window = self.number(info.get("model_context_window"))
+        self.sample = {"input_tokens": used, "window_tokens": window if window else None,
+                       "sample_at_ms": at, "sample_model": model,
+                       "method": "last-request-input"}
+
+    def snapshot(self, model):
+        result = dict(self.sample or {})
+        used, window = result.get("input_tokens"), result.get("window_tokens")
+        result.update({"percent_used": used / window * 100 if used is not None and window else None,
+                       "stale_model": bool(self.sample and self.sample["sample_model"] != model),
+                       "compacted_at_ms": self.compacted_at,
+                       "pending_compaction": bool(self.compacted_at and
+                           self.compacted_at > result.get("sample_at_ms", 0))})
+        return result
 
 
 class Measurements:
@@ -80,9 +131,12 @@ class Measurements:
         self.live_speed = LiveSpeed()
         self.file_created_at = None
         self.agent_path = "/root"
+        self.session_id = None
+        self.subagent_start_ordinal = None
         # A separate replay can retain response timing across a truncated tail,
         # without adding historical usage to the live token counters.
         self.response_history: Measurements | None = None
+        self.context = ContextUsage()
 
     def feed(self, event: dict) -> None:
         if self.response_history is not None:
@@ -92,16 +146,26 @@ class Measurements:
         if not isinstance(p, dict):
             return
         at = timestamp_ms(event.get("timestamp"))
-        if at is not None:
-            self.event_at = max(self.event_at, at)
         event_type = p.get("type")
         if kind == "session_meta":
             if self.file_created_at is None:
                 self.file_created_at = at
                 self.agent_path = p.get("agent_path") or "/root"
+                self.session_id = p.get("id") if isinstance(p.get("id"), str) else None
+                ordinal = p.get("subagent_history_start_ordinal")
+                if type(ordinal) is int and 0 <= ordinal <= 2**63 - 1:
+                    self.subagent_start_ordinal = ordinal
             return
         if self.file_created_at is not None and at is not None and at < self.file_created_at - 2000:
             return  # Copied pre-fork history cannot become fresh speed or activity.
+        ordinal = event.get("ordinal")
+        if (self.subagent_start_ordinal is not None and type(ordinal) is int and
+                0 <= ordinal < self.subagent_start_ordinal):
+            return  # Paginated sub-agent context may carry fresh timestamps.
+        if at is not None:
+            self.event_at = max(self.event_at, at)
+
+        self.context.feed(event, self.model)
 
         if kind == "turn_context":
             self.model = p.get("model") or self.model
@@ -229,6 +293,9 @@ class Measurements:
         if valid and output:
             self.speed_samples.append({
                 "id": response_id or str(at) + ":" + str(self._fingerprint(usage)),
+                "global_id": ("response:" + str(response_id)) if response_id else (
+                    "legacy:" + self.session_id + ":" + str(at) + ":" + str(self._fingerprint(usage))
+                    if self.session_id else None),
                 "start_ms": valid[0], "end_ms": valid[1], "output_tokens": output,
                 "input_tokens": integer(usage.get("input_tokens")),
                 "cached_input_tokens": integer(usage.get("cached_input_tokens")),
@@ -262,7 +329,11 @@ class Measurements:
 
     def snapshot(self, now_ms=None) -> dict:
         durations = self.response_history.response_durations if self.response_history is not None else self.response_durations
+        context = self.context
+        if self.response_history and not context.sample:
+            context = self.response_history.context
         return {"model": self.model, "stage": self.stage, "last": self.last,
+                "context": context.snapshot(self.model),
                 "live_speed": self.live_speed.compute(self, time.time() * 1000 if now_ms is None else now_ms),
                 "response_duration": {
                     "mean_ms": sum(row["duration_ms"] for row in durations) / len(durations) if durations else None,
@@ -384,6 +455,8 @@ class SessionTail:
             result = Measurements(self.measurements.model)
             result.file_created_at = self.measurements.file_created_at
             result.agent_path = self.measurements.agent_path
+            result.session_id = self.measurements.session_id
+            result.subagent_start_ordinal = self.measurements.subagent_start_ordinal
             for row in reversed(records):
                 if row is None:
                     # An oversized row may be a tool result or user message.
@@ -408,12 +481,12 @@ class SessionTail:
             if not isinstance(record, dict):
                 continue
             kind, payload = record.get("type"), record.get("payload")
-            if kind not in ("event_msg", "response_item", "token_usage_record", "turn_context") or not isinstance(payload, dict):
+            if kind not in ("event_msg", "response_item", "token_usage_record", "turn_context", "compacted") or not isinstance(payload, dict):
                 continue
             event_type = payload.get("type")
             if kind == "event_msg" and event_type not in (
                     "task_started", "turn_started", "task_complete", "task_completed", "turn_complete",
-                    "turn_completed", "task_aborted", "turn_aborted", "item_completed", "token_count"):
+                    "turn_completed", "task_aborted", "turn_aborted", "item_completed", "token_count", "context_compacted"):
                 continue
             if kind == "response_item" and event_type not in (
                     "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output", "message"):
@@ -423,7 +496,8 @@ class SessionTail:
                     "thread_token_usage", "turn_token_usage", "info", "started_at_ms", "model") if k in payload}
             if isinstance(payload.get("item"), dict):
                 slim["item"] = {"type": payload["item"].get("type")}
-            records.append({"type": kind, "timestamp": record.get("timestamp"), "payload": slim})
+            records.append({"type": kind, "timestamp": record.get("timestamp"), "payload": slim,
+                            "ordinal": record.get("ordinal")})
             if kind == "token_usage_record" or event_type == "token_count":
                 usage_rows += 1
             else:
@@ -539,6 +613,39 @@ class TailCache:
         while len(self.tails) > self.maximum:
             self.tails.popitem(last=False)
         return tail
+
+
+class GlobalCollector:
+    """Hot logs only; bounded readers and staggered initial replay keep RAM/IO low."""
+    def __init__(self, maximum=64):
+        self.maximum = maximum
+        self.tails = {}
+        self.speed = GlobalSpeed()
+
+    def snapshot(self, rows, now_ms):
+        candidates = sorted((r for r in rows if r.get('rollout_path') and
+                             now_ms - r.get('updated_at_ms', 0) <= 300_000),
+                            key=lambda r: (-r.get('updated_at_ms', 0), r['id']))
+        wanted = {r['id']: r for r in candidates[:self.maximum]}
+        self.tails = {aid: tail for aid, tail in self.tails.items() if aid in wanted}
+        started = 0
+        agents = []
+        complete = len(candidates) <= self.maximum
+        for aid, row in wanted.items():
+            tail = self.tails.get(aid)
+            if tail is None or os.path.normcase(str(tail.path)) != os.path.normcase(row['rollout_path']):
+                if started >= 2:
+                    complete = False
+                    continue
+                tail = SessionTail(row['rollout_path'], row.get('model'), history_bytes=256 * 1024)
+                self.tails[aid] = tail
+                started += 1
+            tail.update()
+            if tail.source_state == 'ok':
+                agents.append((aid, tail.measurements))
+            else:
+                complete = False
+        return self.speed.compute(agents, now_ms, complete)
 
 
 class ActivitySelector:
@@ -659,6 +766,80 @@ def atomic_json(path: Path, value: dict) -> None:
             time.sleep(0.015 * (attempt + 1))
 
 
+class VisibleConversationResolver:
+    """Disambiguate identical titles with hashes of visible, accessible text.
+
+    The bounded read is local and transient. Never persist chat bodies or treat
+    recency, archive status or a background writer as proof of the viewed chat.
+    """
+    def __init__(self):
+        self.key = None
+        self.selected_id = None
+        self.checked = 0.0
+
+    @staticmethod
+    def normalized(text):
+        return ''.join(c.lower() for c in unicodedata.normalize('NFKC', text)
+                       if c.isalnum() and ord(c) <= 65535)
+
+    def choose(self, matches, fingerprints):
+        if not isinstance(fingerprints, list) or not 1 <= len(fingerprints) <= 48 or len(matches) > 4:
+            return None
+        wanted = {h for h in fingerprints if isinstance(h, str) and len(h) == 64 and
+                  all(c in '0123456789abcdef' for c in h)}
+        if not wanted:
+            return None
+        key = (tuple(sorted(r['id'] for r in matches)), tuple(sorted(wanted)))
+        if key == self.key and time.monotonic() - self.checked < 5:
+            return next((r for r in matches if r['id'] == self.selected_id), None)
+        scores = {}
+        for row in matches:
+            hits = set()
+            try:
+                with open(row['rollout_path'], 'rb') as stream:
+                    size = stream.seek(0, 2)
+                    start = max(0, size - 2 * 1024 * 1024)
+                    stream.seek(start)
+                    lines = stream.read().splitlines()
+                if start:
+                    lines = lines[1:]
+                for line in reversed(lines):
+                    if len(line) > 256 * 1024:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        continue
+                    if not isinstance(event, dict) or not isinstance(event.get('payload'), dict):
+                        continue
+                    p = event['payload']
+                    texts = []
+                    if event.get('type') == 'response_item' and p.get('role') in ('user', 'assistant') and p.get('channel') in (None, 'commentary', 'final'):
+                        content = p.get('content')
+                        texts = [item.get('text') for item in content if isinstance(item, dict)] if isinstance(content, list) else []
+                    elif event.get('type') == 'event_msg' and p.get('type') in ('user_message', 'agent_message'):
+                        texts = [p.get('message')]
+                    for text in texts:
+                        if not isinstance(text, str):
+                            continue
+                        normalized = self.normalized(text[:16000])
+                        for i in range(max(0, len(normalized) - 31)):
+                            digest = hashlib.sha256(normalized[i:i + 32].encode()).hexdigest()
+                            if digest in wanted:
+                                hits.add(digest)
+                    if hits == wanted:
+                        break
+            except OSError:
+                pass
+            scores[row['id']] = hits
+        winners = [row for row in matches if scores[row['id']] - set().union(
+            *(scores[r['id']] for r in matches if r['id'] != row['id']))]
+        selected = winners[0] if len(winners) == 1 else None
+        self.key, self.checked = key, time.monotonic()
+        self.selected_id = selected['id'] if selected else None
+        return selected
+
+
 def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once: bool = False,
             dashboard_enabled: bool = False, account_quota: bool = False,
             network_latency: bool = False, reset_radar: bool = False) -> dict | None:
@@ -670,6 +851,8 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
         start_server(codex_home, runtime, native_enabled=os.name == "nt")
     tails = TailCache(maximum=10)
     activity_selector = ActivitySelector()
+    visible_resolver = VisibleConversationResolver()
+    global_collector = GlobalCollector()
     quota = None
     if account_quota and not once:
         from quota import QuotaPoller
@@ -681,7 +864,8 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
     radar = None
     if reset_radar and not once:
         from reset_radar import ResetRadarPoller
-        radar = ResetRadarPoller(interval=180)
+        previous_radar = read_selection(runtime / "metrics.json").get("reset_radar")
+        radar = ResetRadarPoller(interval=180, resume=previous_radar) if isinstance(previous_radar, dict) else ResetRadarPoller(interval=180)
     matched_at = 0.0
     selection_key = None
     last_refresh_id = None
@@ -743,11 +927,27 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
                 selected = catalog.rows.get(selected_id)
             if selected is None and len(matches) == 1 and selection.get("binding_mode") != "manual":
                 selected = matches[0]
+            if selected is None and len(matches) > 1 and selection.get("binding_mode") == "follow":
+                selected = visible_resolver.choose(matches, selection.get("view_fingerprints"))
             status = "ok" if selected else "ambiguous" if len(matches) > 1 else "unbound"
             tail = tails.update(selected, force) if selected else None
             if quota and tail and tail.live_quota:
                 quota.accept(tail.live_quota[0], tail.live_quota[1] / 1000)
             metrics = tail.measurements.snapshot() if tail else None
+            # Recent activity can still describe response timing when the open
+            # chat is ambiguous. Keep it separate from the current-chat identity.
+            activity_fallback = None
+            if selected is None and selection.get("binding_mode") in ("auto", "follow"):
+                recent = activity_selector.choose(list(catalog.rows.values()), tails, time.time() * 1000)
+                if len(recent) == 1:
+                    recent_tail = tails.update(recent[0], force)
+                    if recent_tail:
+                        activity_fallback = {"binding": "ok", "binding_mode": "activity",
+                                             "title": recent[0]["title"], "thread_id": recent[0]["id"],
+                                             "source": recent_tail.source(),
+                                             "metrics": recent_tail.measurements.snapshot(),
+                                             "updated_at_ms": time.time() * 1000}
+            global_speed = global_collector.snapshot(list(catalog.rows.values()), time.time() * 1000)
             if force:
                 refresh_result = {"request_id": refresh_id, "completed_at_ms": time.time() * 1000,
                                   "state": "ok" if tail and tail.source_state == "ok" else
@@ -758,12 +958,18 @@ def monitor(codex_home: Path, runtime: Path, parent_pid: int | None = None, once
             result = {"schema_version": 2, "collector_pid": os.getpid(),
                       "repository_state": repository.state,
                       "binding": status, "binding_mode": selection.get("binding_mode", "auto"),
+                      "view_observed_at_ms": selection.get("view_observed_at_ms"),
                       "thread_id": selected["id"] if selected else None,
                       "title": title, "metrics": metrics, "source": tail.source() if tail else None,
+                      "activity_fallback": activity_fallback,
+                      "global_speed": global_speed,
                       "refresh": refresh_result, "range": range_result,
                       "account_quota": quota.snapshot() if quota else None,
                       "network_latency": latency.snapshot() if latency else None,
                       "reset_radar": radar.snapshot() if radar else None,
+                      "known_titles": list(dict.fromkeys(r['title'] for r in catalog.rows.values()
+                          if not r.get('is_subagent') and r.get('model') != 'codex-auto-review' and
+                          isinstance(r.get('title'), str) and 0 < len(r['title']) <= 160))[:2048],
                       "matches": [{k: r.get(k) for k in ("id", "title", "model", "updated_at")} for r in matches],
                       "threads": [{"id": r["id"], "title": r["title"], "model": r["model"]} for r in list(catalog.rows.values())[:80]]}
             if once:

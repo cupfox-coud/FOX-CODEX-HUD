@@ -281,6 +281,92 @@ class ProxyTransportTests(unittest.TestCase):
 
 
 class RequestTests(unittest.TestCase):
+    def test_unchanged_status_reuses_real_metadata_without_a_second_request(self):
+        cache = radar._MetadataCache()
+        calls, clock = [], [NOW]
+        def request(path):
+            calls.append(path)
+            return (status(currentTime=iso(clock[0])) if path == radar.STATUS_PATH else meta()), {}
+        with patch.object(radar.time, "time", side_effect=lambda: clock[0] / 1000):
+            first = radar._fetch_round(request, cache)
+            clock[0] += 180000
+            second = radar._fetch_round(request, cache)
+        self.assertEqual(calls, [radar.STATUS_PATH, radar.META_PATH, radar.STATUS_PATH])
+        self.assertEqual(second.snapshot["state"], "ok")
+        self.assertEqual(second.snapshot["source_updated_at_ms"], first.snapshot["source_updated_at_ms"])
+
+    def test_changed_signal_rechecks_metadata_and_preserves_reset_type(self):
+        cache = radar._MetadataCache()
+        calls, clock, kind = [], [NOW], ["global"]
+        def request(path):
+            calls.append(path)
+            return (status(scheduled(resetType=kind[0])) if path == radar.STATUS_PATH else meta()), {}
+        with patch.object(radar.time, "time", side_effect=lambda: clock[0] / 1000):
+            radar._fetch_round(request, cache)
+            clock[0] += 180000
+            kind[0] = "banked"
+            result = radar._fetch_round(request, cache)
+        self.assertEqual(calls.count(radar.META_PATH), 2)
+        self.assertEqual(result.snapshot["upcoming"]["reset_type"], "banked")
+
+    def test_metadata_refreshes_after_cache_interval(self):
+        cache = radar._MetadataCache()
+        calls, clock = [], [NOW]
+        def request(path):
+            calls.append(path)
+            return (status() if path == radar.STATUS_PATH else meta(clock[0] - 300000)), {}
+        with patch.object(radar.time, "time", side_effect=lambda: clock[0] / 1000):
+            radar._fetch_round(request, cache)
+            clock[0] += 720000
+            result = radar._fetch_round(request, cache)
+        self.assertEqual(calls.count(radar.META_PATH), 2)
+        self.assertEqual(result.snapshot["source_updated_at_ms"], clock[0] - 300000)
+
+    def test_unchanged_hour_keeps_three_minute_detection_and_reduces_requests(self):
+        cache, calls, clock = radar._MetadataCache(), [], [NOW]
+        def request(path):
+            calls.append(path)
+            return (status(currentTime=iso(clock[0])) if path == radar.STATUS_PATH else meta(clock[0] - 300000)), {}
+        with patch.object(radar.time, "time", side_effect=lambda: clock[0] / 1000):
+            for _ in range(20):
+                self.assertEqual(radar._fetch_round(request, cache).snapshot["state"], "ok")
+                clock[0] += 180000
+        self.assertEqual(calls.count(radar.STATUS_PATH), 20)
+        self.assertEqual(calls.count(radar.META_PATH), 5)
+
+    def test_last_budget_slot_can_use_fresh_matching_cached_metadata(self):
+        cache = radar._MetadataCache()
+        calls, clock, exhausted = [], [NOW], [False]
+        def request(path):
+            calls.append(path)
+            headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": iso(clock[0] + 300000)} if exhausted[0] else {}
+            return (status(scheduled()) if path == radar.STATUS_PATH else meta()), headers
+        with patch.object(radar.time, "time", side_effect=lambda: clock[0] / 1000):
+            radar._fetch_round(request, cache)
+            clock[0] += 180000
+            exhausted[0] = True
+            result = radar._fetch_round(request, cache)
+        self.assertEqual(result.snapshot["state"], "ok")
+        self.assertEqual(result.snapshot["upcoming"]["reset_type"], "global")
+        self.assertEqual(result.not_before_ms, clock[0] + 300000)
+        self.assertEqual(calls.count(radar.META_PATH), 1)
+
+    def test_exhausted_budget_cannot_reuse_different_or_stale_metadata(self):
+        for changed, elapsed in ((True, 180000), (False, 1800001)):
+            cache = radar._MetadataCache()
+            clock, exhausted = [NOW], [False]
+            def request(path):
+                headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": iso(clock[0] + 300000)} if exhausted[0] else {}
+                record = scheduled(resetType="banked" if changed and exhausted[0] else "global")
+                return (status(record) if path == radar.STATUS_PATH else meta(NOW)), headers
+            with patch.object(radar.time, "time", side_effect=lambda: clock[0] / 1000):
+                radar._fetch_round(request, cache)
+                clock[0] += elapsed
+                exhausted[0] = True
+                result = radar._fetch_round(request, cache)
+            self.assertEqual(result.snapshot["state"], "limited")
+            self.assertIsNone(result.snapshot["upcoming"])
+
     def test_exactly_two_fixed_public_gets_and_source_metadata(self):
         paths = []
         def request(path):
@@ -359,6 +445,19 @@ class RequestTests(unittest.TestCase):
 
 
 class PollerTests(unittest.TestCase):
+    def test_restart_preserves_rate_limit_backoff_even_on_manual_refresh(self):
+        called = threading.Event()
+        previous = {"state": "limited", "reason": "rate_limited", "next_check_at_ms": (time.time() + .25) * 1000}
+        poller = radar.ResetRadarPoller(sampler=lambda: (called.set() or radar._empty("ok")), resume=previous)
+        try:
+            self.assertEqual(poller.snapshot()["state"], "limited")
+            poller.refresh()
+            self.assertFalse(called.wait(.1))
+            self.assertTrue(called.wait(1))
+        finally:
+            poller.close()
+            poller._thread.join(1)
+
     def test_snapshot_and_close_do_not_block_on_http(self):
         started, release = threading.Event(), threading.Event()
         def sample():

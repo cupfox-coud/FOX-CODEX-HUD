@@ -656,6 +656,27 @@ class ActivityBindingIntegrationTest(unittest.TestCase):
         self.assertIsNone(result["thread_id"])
         self.assertEqual({row["id"] for row in result["matches"]}, {"one", "two"})
 
+    def test_ambiguous_open_chat_keeps_recent_activity_separate(self):
+        rows = [("old", "Same title", "gpt-6-astra", 10),
+                ("new", "Same title", "gpt-6.1-sol", 20)]
+        result = self.collect(rows, mode="auto", title="Same title")
+        self.assertEqual(result["binding"], "ambiguous")
+        self.assertIsNone(result["thread_id"])
+        self.assertIsNone(result["metrics"])
+        recent = result["activity_fallback"]
+        self.assertEqual(recent["thread_id"], "new")
+        self.assertEqual(recent["binding_mode"], "activity")
+        self.assertEqual(recent["metrics"]["model"], "gpt-6.1-sol")
+        manual = self.collect(rows, mode="manual", selected_id="missing", title="Same title")
+        self.assertIsNone(manual["activity_fallback"])
+
+    def test_unique_open_chat_does_not_take_newer_background_activity(self):
+        result = self.collect([("open", "Open", "gpt-6-astra", 10),
+                               ("background", "Background", "gpt-6.1-sol", 20)],
+                              mode="auto", title="Open")
+        self.assertEqual(result["thread_id"], "open")
+        self.assertIsNone(result["activity_fallback"])
+
     def test_background_writes_do_not_steal_a_more_recently_started_task(self):
         rows = [("background", "Background", "gpt-6-astra", 10),
                 ("current", "Current", "gpt-6.1-sol", 20)]

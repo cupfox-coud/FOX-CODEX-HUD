@@ -15,7 +15,7 @@ namespace CodexTokenHud
         internal double CornerOpacity = 0.78;
         internal bool CornerHoverFade = true;
         internal string CornerMotion = "system";
-        internal double SpeedRedline = 200;
+        internal double SpeedRedline = 300;
         internal string Runtime { get { return Path.Combine(DataDirectory, "runtime"); } }
         internal string Layout { get { return Path.Combine(DataDirectory, "user-layout.json"); } }
 
@@ -38,8 +38,9 @@ namespace CodexTokenHud
             result.CornerHoverFade = !Json.Text(settings, "corner_hover_fade").Equals("False", StringComparison.OrdinalIgnoreCase);
             string motion = Json.Text(settings, "corner_motion").ToLowerInvariant();
             result.CornerMotion = motion == "on" || motion == "off" ? motion : "system";
-            double redline = Json.Number(settings, "speed_redline") ?? 200;
-            result.SpeedRedline = double.IsNaN(redline) || double.IsInfinity(redline) ? 200 : Math.Max(50, Math.Min(2000, redline));
+            double redline = Json.Number(settings, "speed_redline") ?? 300;
+            // The previous default was 200; retain other explicit custom ranges.
+            result.SpeedRedline = double.IsNaN(redline) || double.IsInfinity(redline) || redline == 200 ? 300 : Math.Max(50, Math.Min(2000, redline));
             string home = Json.Text(settings, "codex_home");
             if (string.IsNullOrWhiteSpace(home)) home = Environment.GetEnvironmentVariable("CODEX_HOME");
             if (string.IsNullOrWhiteSpace(home)) home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");

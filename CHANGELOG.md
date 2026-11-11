@@ -1,5 +1,85 @@
 # Changelog
 
+## FOX CODEX HUD 1.3.0-beta.8.corner.55
+
+Keep the three-minute public reset status checks while reusing verified snapshot
+freshness for unchanged signals, refreshing that metadata approximately every 12–15
+minutes. Changed signals immediately recheck it; stale, missing or mismatched
+metadata never validates an actionable reminder. An exhausted budget can still
+use matching fresh metadata from a previous check, and the rate-limit cooldown
+survives a collector restart. The service's shared IP limit still applies.
+
+Refresh the repository homepage, showcase and synthetic native screenshots to
+reflect the current global output, context, quota and network layout.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.54
+
+Restyle the two quota readouts as open, aligned columns inside the existing
+quota group. Remove their separate button-like frames, use a consistent 22 px
+number style, and align hourly/percentage units to the same baseline in fixed
+slots. Number transitions cannot collide with units when the digit count changes.
+Replace the deficit bezel with a feathered obsidian wash and a gently breathing
+amber underline. Keep the existing layout, quota calculations and other effects.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.53
+
+Preserve the corner.51 three-group layout and dimensions. Give the existing
+inner sections clearer inset edges. Replace the wide daily-advice treatment
+with two aligned readouts: recent official quota consumption in percentage
+points per hour, and signed daily advice. The rate uses up to five minutes of
+observed balance changes, warms up for one minute, and rebases on a reset,
+refill or sampling gap; output tokens are never converted into quota spend.
+
+Automatically follow the last viewed desktop chat, retaining that selection
+when another app receives focus. Resolve duplicate titles only with matching
+hashes of visible accessibility text and local conversation records. Missing
+or conflicting evidence remains qualified instead of selecting a background
+task. Explicit tray pinning remains available.
+
+Clip output acceleration and completion feedback to the output subsection.
+Keep the response and context sections steady. Use a feathered, low-opacity
+rainbow beam with a slight diagonal slant and smooth entrance/exit. Preserve
+the existing timing, static-motion preference and low-memory protection.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.51
+
+Group global throughput, per-conversation response timing and context occupancy
+at the top; combine weekly balance, signed daily advice and reset radar; keep
+both VPN routes together below. Remove the quota battery, depletion timeline
+and redundant consumed/daily-allocation readouts. Retain the existing native
+number transitions, rainbow coupling, radar distinction and memory protection.
+
+Measure reference context occupancy from the latest reported request input and
+its own model window, independently of cumulative billing. Refresh even when
+cumulative counters repeat. Never guess a window or treat background activity
+as the currently viewed chat. Local foreground title matching and explicit
+manual binding are supported; unknown identities remain qualified. Show handoff
+guidance at 70%/85% with hysteresis, per-conversation deduplication and bounded
+state. Retain explicit compaction markers without inferring them from a drop.
+
+Raise the default speed range to 300 tok/s; flow through the spectrum above
+200 tok/s and on acceleration sweeps. Preserve actual readings above the range.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.50
+
+The Windows corner instrument now aggregates local Codex sessions and subagents
+over one three-second wall-clock window. Project selection no longer resets its
+value, chart, heat or rainbow coupling. Show generating/tool task counts and a
+30-second aggregate average. Tool/idle pauses drain naturally to zero; missing
+baselines and incomplete discovery are explicitly qualified. Keep per-thread
+activity and response detail independent. Deduplicate response IDs across logs
+and discard paginated subagent inherited context. Bound hot-log readers and
+response retention; stage startup reads to limit memory and IO bursts.
+
+## FOX CODEX HUD 1.3.0-beta.8.corner.49
+
+Separate the weekly percentage from its battery fill. The large rainbow number
+now sits above an inset charge rail with a fine highlight and a muted terminal;
+numeric transitions are clipped clear of the rail. Keep the percentage unit
+clear of outgoing wider numbers during a change. Re-space the dated timeline
+and hatched waiting interval without increasing the panel size. Balance, time
+coverage, reset signalling and daily budget calculations retain their meanings.
+
 ## FOX CODEX HUD 1.3.0-beta.8.corner.48
 
 The speed dial moves from aqua through violet and rose to gold. A substantial

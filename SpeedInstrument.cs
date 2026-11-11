@@ -155,6 +155,8 @@ namespace CodexTokenHud
         private SpeedDisplay speedView = new SpeedDisplay();
         private readonly HeatMotion speedMotion = new HeatMotion();
         private readonly HeatMotion speedColorMotion = new HeatMotion();
+        private readonly HeatMotion speedSpectrumMotion = new HeatMotion();
+        private bool speedSpectrum;
         private readonly SpectrumFlow quotaFlow = new SpectrumFlow();
         private Color displayedSpeedColor = Muted;
         private readonly ReadoutTransition speedDigits = new ReadoutTransition(), speedMode = new ReadoutTransition(),
@@ -170,7 +172,7 @@ namespace CodexTokenHud
         private bool ReadoutsMoving(double now)
         {
             return motionAllowed && !renderMemory.Reduced && (speedDigits.Moving(now) || speedMode.Moving(now) ||
-                lastSpeedDigits.Moving(now) || cacheDigits.Moving(now) || quotaDigits.Moving(now) || todayDigits.Moving(now) ||
+                lastSpeedDigits.Moving(now) || cacheDigits.Moving(now) || quotaDigits.Moving(now) || todayDigits.Moving(now) || paceDigits.Moving(now) ||
                 cycleDigits.Moving(now) || allowanceDigits.Moving(now) || aiDigits.Moving(now) || generalDigits.Moving(now) ||
                 radarDigits.Moving(now) || responseDigits.Moving(now) || activityLabel.Moving(now));
         }
@@ -270,27 +272,36 @@ namespace CodexTokenHud
         private void PaintSpeedInstrument(Graphics g, double clock)
         {
             speedView = SpeedDisplay.Read(data, selectedTitle, EpochMs());
-            double target = speedView.Ready && speedView.Rate.HasValue ? Math.Min(1, Math.Pow(speedView.Rate.Value / configuration.SpeedRedline, .6)) : 0;
-            speedMotion.Update(target, clock, motionAllowed && !renderMemory.Reduced, Json.Text(data, "thread_id"), speedView.LastResponseAt);
+            string readoutKey = speedView.Global ? "codex-global:" + Json.Text(data, "collector_pid") :
+                Json.Text(data, "thread_id") + ":" + Json.Text(Json.Object(data, "metrics"), "model");
+            double target = speedView.Ready && speedView.Rate.HasValue ? Math.Min(1, speedView.Rate.Value / configuration.SpeedRedline) : 0;
+            speedMotion.Update(target, clock, motionAllowed && !renderMemory.Reduced, readoutKey, speedView.LastResponseAt);
             speedColorMotion.Update(speedView.Ready ? speedView.Rate.GetValueOrDefault() : 0, clock,
-                motionAllowed && !renderMemory.Reduced, Json.Text(data, "thread_id"), speedView.LastResponseAt);
+                motionAllowed && !renderMemory.Reduced, readoutKey, speedView.LastResponseAt);
             double heat = Math.Max(0, Math.Min(1, speedMotion.Value));
             Color tone = speedView.Ready ? SpeedColor(Math.Max(0, speedColorMotion.Value)) : Muted;
+            speedSpectrum = speedView.Ready && (speedView.Rate >= 200 || (speedSpectrum && speedView.Rate >= 195));
+            speedSpectrumMotion.Update(speedSpectrum ? 1 : 0, clock, motionAllowed && !renderMemory.Reduced, readoutKey, 0);
+            double spectrum = Math.Max(0, Math.Min(1, speedSpectrumMotion.Value));
             displayedSpeedColor = tone;
             bool flowing = speedView.Ready && speedView.Phase == "生成中";
-            string readoutKey = Json.Text(data, "thread_id") + ":" + Json.Text(Json.Object(data, "metrics"), "model");
             speedSurge.Observe(clock, speedView.LiveRate, flowing && motionAllowed && !renderMemory.Reduced &&
                 (speedView.State == "measured" || speedView.State == "estimating"), readoutKey);
             instrumentFlow.Update(clock, heat, flowing, motionAllowed && !renderMemory.Reduced,
-                Json.Text(data, "thread_id") + ":" + Json.Text(Json.Object(data, "metrics"), "model"));
-            var bounds = new RectangleF(20, 70, 360, 178);
-            GlassPanel(g, bounds, tone, speedView.Phase == "生成中" ? (int)(heat * 35) : 0);
+                readoutKey);
+            // Keep one performance group; only its output inset owns speed effects.
+            GlassPanel(g, new RectangleF(20, 70, 360, 336), Blue, 0);
+            var bounds = new RectangleF(28, 78, 344, 170);
+            InsetSection(g, bounds, tone, flowing ? (int)(55 + heat * 35) : 0);
             var saved = g.Save();
-            using (var clip = RoundedCard(bounds, 18)) g.SetClip(clip, CombineMode.Intersect);
+            using (var clip = RoundedCard(bounds, 10)) g.SetClip(clip, CombineMode.Intersect);
             try
             {
                 PaintSpeedSurge(g, bounds, tone, clock);
-                CornerText(g, "输出速度", cornerTitleFont, Ink, new RectangleF(36, 80, 88, 22), false);
+                CornerText(g, speedView.Global ? "全局输出" : "输出速度", cornerTitleFont, Ink, new RectangleF(36, 80, 88, 22), false);
+                if (speedView.Global)
+                    CornerText(g, "生成 " + speedView.Generating + " · 工具 " + speedView.Tools,
+                        cornerMicroFont, Muted, new RectangleF(144, 81, 132, 21), true);
                 var badge = new RectangleF(286, 81, 78, 21);
                 Panel(g, badge, Color.FromArgb(10, speedView.Estimated ? Amber : tone), Color.FromArgb(25, speedView.Estimated ? Amber : tone), 10);
                 MovingText(g, speedMode, speedView.Mode, cornerMicroFont, speedView.Estimated ? Amber : Muted, badge, StringAlignment.Center, readoutKey);
@@ -305,6 +316,7 @@ namespace CodexTokenHud
                     bool lit = illumination > 0;
                     double position = Math.Min(1, (i + 1) / Math.Max(1, heat * 36));
                     Color segment = Mix(SpeedColor(Math.Max(0, speedColorMotion.Value) * (.42 + .58 * position)), tone, .15);
+                    segment = Mix(segment, SpectrumColor((double)i / 36 + instrumentFlow.Phase, true), spectrum);
                     float inner = lit ? 51 : 53;
                     var a = new PointF(cx + inner * (float)Math.Cos(angle), cy + inner * (float)Math.Sin(angle));
                     var b = new PointF(cx + radius * (float)Math.Cos(angle), cy + radius * (float)Math.Sin(angle));
@@ -331,20 +343,34 @@ namespace CodexTokenHud
                         using (var pen = new Pen(Color.FromArgb((int)(100 * (1 - burst)), tone), 1.2f)) g.DrawEllipse(pen, cx - r, cy - r, r * 2, r * 2);
                     }
                 Font valueFont = speedView.Value.Length > 5 ? cornerNumberFont : instrumentFont;
-                MovingText(g, speedDigits, speedView.Value, valueFont, speedView.Ready ? Mix(tone, Ink, .12) : Muted,
-                    new RectangleF(39, 141, 122, 49), StringAlignment.Center, readoutKey);
+                var digitBounds = new RectangleF(39, 141, 122, 49);
+                if (spectrum > .005)
+                    MovingReadout(g, speedDigits, speedView.Value, valueFont, digitBounds, StringAlignment.Center, readoutKey,
+                        delegate(string part, RectangleF box, double alpha) {
+                            using (var brush = QuotaSpectrumBrush(digitBounds, instrumentFlow.Phase, true, (int)(255 * alpha)))
+                            {
+                                var blend = brush.InterpolationColors;
+                                blend.Colors = blend.Colors.Select(c => Color.FromArgb(c.A, Mix(tone, c, spectrum))).ToArray();
+                                brush.InterpolationColors = blend;
+                                QuotaBrushText(g, part, valueFont, brush, box);
+                            }
+                        });
+                else MovingText(g, speedDigits, speedView.Value, valueFont, speedView.Ready ? Mix(tone, Ink, .12) : Muted,
+                    digitBounds, StringAlignment.Center, readoutKey);
                 CornerText(g, "tok/s", cornerMicroFont, Muted, new RectangleF(60, 189, 80, 16), StringAlignment.Center);
                 string title = !speedView.Ready ? "等待计时" : speedView.Phase == "工具中" ? "工具中" :
-                    speedView.Phase == "待机" ? "静候" : heat < .4 ? "巡航" : heat < .65 ? "加速" : heat < .85 ? "疾驰" : "极速";
+                    speedView.Phase == "待机" ? "静候" : speedSpectrum ? "高速" : heat < .4 ? "巡航" : heat < .65 ? "加速" : heat < .85 ? "疾驰" : "极速";
                 CornerText(g, title, cornerSmallFont, tone, new RectangleF(65, 221, 70, 19), StringAlignment.Center);
-                CornerText(g, "上次实测", cornerMicroFont, Muted, new RectangleF(181, 115, 88, 17), false);
+                CornerText(g, "0", cornerMicroFont, Muted, new RectangleF(39, 214, 24, 17), false);
+                CornerText(g, configuration.SpeedRedline.ToString("0"), cornerMicroFont, Muted, new RectangleF(139, 214, 38, 17), true);
+                CornerText(g, speedView.Global ? "近30秒均速" : "上次实测", cornerMicroFont, Muted, new RectangleF(181, 115, 88, 17), false);
                 MovingText(g, lastSpeedDigits, SpeedDisplay.Format(speedView.LastRate), cornerValueFont, SpeedColor(speedView.LastRate),
                     new RectangleF(179, 134, 95, 27), StringAlignment.Near, readoutKey);
                 CornerText(g, "缓存命中", cornerMicroFont, Muted, new RectangleF(282, 115, 80, 17), false);
                 MovingText(g, cacheDigits, SpeedDisplay.Valid(speedView.Cache) ? speedView.Cache.Value.ToString("0.#", CultureInfo.InvariantCulture) + "%" : "—",
                     cornerValueFont, Ink, new RectangleF(280, 134, 83, 27), StringAlignment.Near, readoutKey);
                 PaintSpeedHistory(g);
-                string footer = (speedView.State == "range" ? "区间 " : "本轮 ") +
+                string footer = (speedView.Global ? "采样 " : speedView.State == "range" ? "区间 " : "本轮 ") +
                     (speedView.ConfirmedOutput > 0 ? SpeedDisplay.Tokens(speedView.ConfirmedOutput) : "—") + " tok  ·  峰值 " + SpeedDisplay.Format(speedView.Peak);
                 CornerText(g, footer, cornerMicroFont, Muted, new RectangleF(181, 221, 178, 18), false);
                 PaintInstrumentReceipt(g, bounds, clock, tone);
@@ -355,24 +381,36 @@ namespace CodexTokenHud
 
         private void PaintSpeedSurge(Graphics g, RectangleF bounds, Color tone, double clock)
         {
+            if (!motionAllowed || renderMemory.Reduced) return;
             double t = (clock - speedSurge.Started) / SpeedSurge.Duration;
             if (t < 0 || t >= 1) return;
-            // Fast attack and a long release. The colored reflection sweeps out
-            // from the dial while its center and all data stay in place.
-            double envelope = Math.Min(1, t * 12) * (1 - t * t);
+            // Feathered, slightly inclined light with a smooth attack and release.
+            // The caller clips every part to the output section above response.
+            double envelope = Math.Pow(Math.Sin(Math.PI * t), 1.3);
             Color hot = Mix(tone, Color.FromArgb(255, 242, 195), .65);
-            float travel = (float)(1 - Math.Pow(1 - t, 2));
-            using (var atmosphere = new LinearGradientBrush(bounds, Color.FromArgb((int)(83 * envelope), tone),
-                Color.FromArgb(0, tone), 12f)) g.FillRectangle(atmosphere, bounds);
-            var band = new RectangleF(bounds.Left - 90 + travel * (bounds.Width + 100), bounds.Top, 130, bounds.Height);
-            using (var beam = new LinearGradientBrush(band, Color.Transparent, Color.Transparent, 0f))
+            float travel = (float)(t * t * (3 - 2 * t));
+            using (var atmosphere = new LinearGradientBrush(bounds, Color.FromArgb((int)(25 * envelope), tone),
+                Color.FromArgb(0, tone), 22f)) g.FillRectangle(atmosphere, bounds);
+            var beamState = g.Save();
+            try
             {
-                beam.InterpolationColors = new ColorBlend { Colors = new[] {Color.FromArgb(0, tone),
-                    Color.FromArgb((int)(58 * envelope), tone), Color.FromArgb(0, hot)}, Positions = new[] {0f, .65f, 1f} };
-                g.FillRectangle(beam, band);
+                float x = bounds.Left - 125 + travel * (bounds.Width + 300);
+                using (var tilt = new Matrix(1, 0, -.24f, 1, x, bounds.Top)) g.MultiplyTransform(tilt, MatrixOrder.Prepend);
+                var band = new RectangleF(-100, -24, 200, bounds.Height + 48);
+                using (var beam = new LinearGradientBrush(band, Color.Transparent, Color.Transparent, 0f))
+                {
+                    beam.InterpolationColors = new ColorBlend {
+                        Colors = new[] {Color.FromArgb(0, Blue), Color.FromArgb((int)(6 * envelope), Blue),
+                            Color.FromArgb((int)(24 * envelope), Blue), Color.FromArgb((int)(34 * envelope), Color.FromArgb(220,154,255)),
+                            Color.FromArgb((int)(32 * envelope), Color.FromArgb(255,183,199)), Color.FromArgb((int)(27 * envelope), Mint),
+                            Color.FromArgb((int)(6 * envelope), Mint), Color.FromArgb(0, hot)},
+                        Positions = new[] {0f,.12f,.3f,.46f,.59f,.73f,.88f,1f}};
+                    g.FillRectangle(beam, band);
+                }
             }
-            using (var edge = new Pen(Color.FromArgb((int)(165 * envelope), tone), 2))
-            using (var outline = RoundedCard(bounds, 18)) g.DrawPath(edge, outline);
+            finally { g.Restore(beamState); }
+            using (var edge = new Pen(Color.FromArgb((int)(85 * envelope), tone), 1.3f))
+            using (var outline = RoundedCard(bounds, 10)) g.DrawPath(edge, outline);
             float head = 140 + travel * 308;
             using (var ribbon = new Pen(Color.Empty, 3))
             {
@@ -380,7 +418,7 @@ namespace CodexTokenHud
                 for (int i = 0; i < 7; i++)
                 {
                     double light = 1 - i / 7.0;
-                    ribbon.Color = Color.FromArgb((int)(240 * envelope * light), Mix(tone, hot, light * light));
+                    ribbon.Color = Color.FromArgb((int)(175 * envelope * light), SpectrumColor(i / 7.0 + t, true));
                     g.DrawArc(ribbon, 35, 107, 130, 130, head - i * 9, 9.5f);
                 }
             }
@@ -393,7 +431,7 @@ namespace CodexTokenHud
                     float x = (float)Math.Cos(angle), y = (float)Math.Sin(angle);
                     float r = 61 + travel * (6 + (i * 7 % 12));
                     float length = (float)(2 + envelope * (3 + i % 5));
-                    streak.Color = Color.FromArgb((int)(220 * envelope), i % 3 == 0 ? hot : tone);
+                    streak.Color = Color.FromArgb((int)(150 * envelope), SpectrumColor(i / 19.0 + t, true));
                     g.DrawLine(streak, 100 + r*x, 172 + r*y, 100 + (r+length)*x - 2*y, 172 + (r+length)*y + 2*x);
                 }
             }
@@ -454,7 +492,8 @@ namespace CodexTokenHud
             using (var baseLine = new Pen(Color.FromArgb(30, Blue))) g.DrawLine(baseLine, plot.Left, plot.Bottom, plot.Right, plot.Bottom);
             if (speedView.History.Count == 0) return;
             double targetCeiling = Math.Max(10, speedView.History.Max() * 1.2);
-            chartCeiling.Update(targetCeiling, MotionMs, motionAllowed && !renderMemory.Reduced, Json.Text(data, "thread_id"), 0);
+            chartCeiling.Update(targetCeiling, MotionMs, motionAllowed && !renderMemory.Reduced,
+                speedView.Global ? "codex-global:" + Json.Text(data, "collector_pid") : Json.Text(data, "thread_id"), 0);
             double ceiling = Math.Max(10, chartCeiling.Value);
             double now = EpochMs();
             bool timed = speedView.HistoryTimes.Count == speedView.History.Count && speedView.HistoryTimes.All(t => t > 0);
@@ -474,7 +513,9 @@ namespace CodexTokenHud
                     using (var wash = new LinearGradientBrush(plot, Color.FromArgb(28, displayedSpeedColor), Color.FromArgb(0, displayedSpeedColor), 90f)) g.FillPath(wash, area);
                 }
             for (int i = 1; i < points.Length; i++)
-                using (var pen = new Pen(Color.FromArgb(speedView.Estimates[i] ? 150 : 220, SpeedColor((speedView.History[i - 1] + speedView.History[i]) / 2)), 1.4f))
+                using (var pen = new Pen(Color.FromArgb(speedView.Estimates[i] ? 150 : 220,
+                    (speedView.History[i - 1] + speedView.History[i]) / 2 >= 200 ? SpectrumColor(i / 60.0 + instrumentFlow.Phase, true) :
+                    SpeedColor((speedView.History[i - 1] + speedView.History[i]) / 2)), 1.4f))
                 { if (speedView.Estimates[i]) pen.DashStyle = DashStyle.Dash; g.DrawLine(pen, points[i - 1], points[i]); }
             if (points.Length > 0 && speedView.Ready)
             {

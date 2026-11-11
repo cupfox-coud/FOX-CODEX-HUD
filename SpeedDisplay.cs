@@ -11,6 +11,8 @@ namespace CodexTokenHud
         internal double? Rate, LiveRate, Recent, Peak, Cache, LastRate;
         internal double Share, LastResponseAt, ConfirmedOutput;
         internal bool Estimated, Ready;
+        internal bool Global;
+        internal int Generating, Tools;
         internal readonly List<double> History = new List<double>();
         internal readonly List<bool> Estimates = new List<bool>();
         internal readonly List<double> HistoryTimes = new List<double>();
@@ -35,6 +37,8 @@ namespace CodexTokenHud
 
         internal static SpeedDisplay Read(Dictionary<string, object> data, string selectedTitle, double now)
         {
+            var global = Json.Object(data, "global_speed");
+            if (global != null) return ReadGlobal(data, global, now);
             var result = new SpeedDisplay();
             double? heartbeat = Numeric(data, "updated_at_ms");
             if (Json.Text(data, "binding") != "ok" || Json.Text(data, "title") != selectedTitle ||
@@ -108,6 +112,46 @@ namespace CodexTokenHud
                 var measured = Numeric(point, "measured"); var estimated = Numeric(point, "estimated");
                 result.History.Add((Valid(measured) ? measured.Value : 0) + (Valid(estimated) ? estimated.Value : 0));
                 result.Estimates.Add(Valid(estimated) && estimated.Value > 0);
+                result.HistoryTimes.Add(Numeric(point, "at_ms") ?? 0);
+            }
+            return result;
+        }
+
+        private static SpeedDisplay ReadGlobal(Dictionary<string, object> data, Dictionary<string, object> frame, double now)
+        {
+            var result = new SpeedDisplay { Global = true };
+            var heartbeat = Numeric(data, "updated_at_ms");
+            var updated = Numeric(frame, "updated_at_ms");
+            if (Json.Text(frame, "scope") != "global" || !Valid(heartbeat) || !Valid(updated) ||
+                now - heartbeat > 6000 || heartbeat > now + 30000 || now - updated > 3000 || updated > now + 30000)
+                return result;
+            result.Generating = (int)Math.Min(64, Numeric(frame, "generating") ?? 0);
+            result.Tools = (int)Math.Min(64, Numeric(frame, "tools") ?? 0);
+            result.State = Json.Text(frame, "state");
+            result.LiveRate = Numeric(frame, "rate");
+            result.Rate = result.LiveRate;
+            result.Share = Math.Max(0, Math.Min(1, Numeric(frame, "estimated_share") ?? 0));
+            result.Estimated = result.Share > .0001;
+            result.Phase = result.Generating > 0 ? "生成中" : result.Tools > 0 ? "工具中" : "待机";
+            bool complete = Json.Get(frame, "complete") is bool && (bool)Json.Get(frame, "complete");
+            result.Ready = Valid(result.Rate) && (result.State == "measured" || result.State == "estimating" ||
+                result.State == "tools" || result.State == "idle") && (complete || result.Rate > 0);
+            result.Mode = !complete ? "部分采集" : result.State == "warming" ? "建立基线" :
+                (Numeric(frame, "warming") ?? 0) > 0 ? "部分待测" : result.Estimated ? "全局估算" :
+                result.LiveRate > 0 ? "全局实测" : result.Tools > 0 ? "工具执行中" : "暂无输出";
+            result.Value = result.Ready ? Format(result.Rate) : "—";
+            result.LastRate = Numeric(frame, "average_30s");
+            result.Recent = result.LastRate;
+            result.Cache = Numeric(frame, "cache_percent");
+            result.Peak = Numeric(frame, "peak_rate");
+            result.ConfirmedOutput = Numeric(frame, "confirmed_turn_output") ?? 0;
+            result.LastResponseAt = Numeric(frame, "last_response_at_ms") ?? 0;
+            foreach (var point in Json.List(frame, "history").TakeLastCompat(60))
+            {
+                var measured = Numeric(point, "measured") ?? 0;
+                var estimated = Numeric(point, "estimated") ?? 0;
+                result.History.Add(measured + estimated);
+                result.Estimates.Add(estimated > 0);
                 result.HistoryTimes.Add(Numeric(point, "at_ms") ?? 0);
             }
             return result;

@@ -150,10 +150,11 @@ def read_limits(codex_home: Path, timeout: float = 25, executable: str | None = 
 class QuotaPoller:
     """Keep network latency entirely outside the metrics collector's fast loop."""
     def __init__(self, codex_home: Path, interval: float = 30, history_file: Path | None = None):
-        from quota_forecast import QuotaForecast
+        from quota_forecast import QuotaForecast, QuotaPace
         self.codex_home = codex_home
         self.interval = interval
         self.forecast = QuotaForecast(codex_home, history_file)
+        self.pace = QuotaPace(self.forecast.samples, self.forecast.reset)
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -176,7 +177,7 @@ class QuotaPoller:
 
     def _calculate(self, now):
         weekly = next((w for w in self._state['windows'] if w['window_minutes'] == 10080), None)
-        self._state = dict(self._state, runway=self.forecast.observe(weekly, now))
+        self._state = dict(self._state, runway=self.forecast.observe(weekly, now), pace=self.pace.snapshot(now))
         self._calculated_at = now
 
     def accept(self, windows, observed_at, source='local_event'):
@@ -209,6 +210,8 @@ class QuotaPoller:
             self._observed_at = observed_at
             self._state = {'state': 'ok', 'windows': windows, 'source': source,
                            'updated_at_ms': observed_at * 1000}
+            weekly = next((w for w in windows if w['window_minutes'] == 10080), None)
+            self.pace.observe(weekly, observed_at)
             self._calculate(now)
         return True
 

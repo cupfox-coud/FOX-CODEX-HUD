@@ -55,7 +55,7 @@ class CornerHudTests
             int margin = (int)Math.Round(18 * scale);
             Check(hud.Right == target.WorkingArea.Right - margin && hud.Top == target.WorkingArea.Top + margin,
                 "card is anchored at the secondary monitor top-right in physical coordinates");
-            Check(hud.Width == (int)Math.Round(400 * scale) && hud.Height == (int)Math.Round(738 * scale),
+            Check(hud.Width == (int)Math.Round(400 * scale) && hud.Height == (int)Math.Round(722 * scale),
                 "compact card respects the destination monitor DPI");
             Check(Native.IsWindowVisible(hud.Handle) && Native.IsTopmost(hud.Handle) && Native.GetForegroundWindow() == foreground,
                 "card stays visible without any Codex window and never takes focus");
@@ -283,6 +283,7 @@ class CornerHudTests
             CheckMotionPreferences(hud, config);
             SaveDesignAnimation(hud, root);
             SaveRealtimeAnimation(hud, root);
+            CheckGlobalInstrument(hud, root);
 #if HUD_TEST
             CheckMemoryProtection(hud, root);
 #endif
@@ -389,7 +390,7 @@ class CornerHudTests
         using (var b = TodaySurface(hud, 2700))
         {
             int changed = 0;
-            for (int y = 260; y < 456; y++) for (int x = 20; x < 380; x++)
+            for (int y = 454; y < 503; y++) for (int x = 205; x < 364; x++)
                 if (a.GetPixel(x, y) != b.GetPixel(x, y)) changed++;
             return changed;
         }
@@ -408,7 +409,7 @@ class CornerHudTests
             Set(hud, "quotaToday", debt); Set(hud, "motionAllowed", true);
             Check(TodaySurfaceChanges(hud) > 300, "over-budget light moves visibly while the number remains fixed");
             using (var frame = TodaySurface(hud, 1000))
-                Check(frame.GetPixel(32, 432).GetBrightness() < .12f, "the warning keeps a dark obsidian surface");
+                Check(frame.GetPixel(327, 478).GetBrightness() < .12f, "the warning keeps a dark obsidian surface");
             Set(hud, "motionAllowed", false);
             Check(TodaySurfaceChanges(hud) == 0, "reduced motion keeps the warning visible without animated pixels");
             Set(hud, "motionAllowed", true);
@@ -515,7 +516,7 @@ class CornerHudTests
         using (var b = FutureRailFrame(hud, 2600))
         {
             int count = 0;
-            for (int y = 363; y < 377; y++) for (int x = from; x < to; x++)
+            for (int y = 374; y < 384; y++) for (int x = from; x < to; x++)
                 if (a.GetPixel(x, y) != b.GetPixel(x, y)) count++;
             return count;
         }
@@ -609,16 +610,16 @@ class CornerHudTests
             Set(hud, "data", data); Set(hud, "motionAllowed", true); Set(hud, "nextMotionPreference", double.MaxValue);
             Set(hud, "previewMotionClock", 1000.0); Call(hud, "UpdateMetrics");
             Check((string)Call(hud, "QuotaResetLink") == "none", "everyday rainbow never fabricates a reset signal");
-            using (var empty = new Bitmap(200, 350))
-            using (var quarter = new Bitmap(200, 350))
-            using (var full = new Bitmap(200, 350))
+            using (var empty = new Bitmap(200, 360))
+            using (var quarter = new Bitmap(200, 360))
+            using (var full = new Bitmap(200, 360))
             {
                 using (var g = Graphics.FromImage(empty)) Call(hud, "PaintQuotaBattery", g, 0.0);
                 using (var g = Graphics.FromImage(quarter)) Call(hud, "PaintQuotaBattery", g, 25.0);
                 using (var g = Graphics.FromImage(full)) Call(hud, "PaintQuotaBattery", g, 100.0);
-                Check(quarter.GetPixel(68, 337) == full.GetPixel(68, 337) &&
-                    quarter.GetPixel(77, 337) == empty.GetPixel(77, 337) &&
-                    full.GetPixel(170, 337) != quarter.GetPixel(170, 337),
+                Check(quarter.GetPixel(68, 346) == full.GetPixel(68, 346) &&
+                    quarter.GetPixel(77, 346) == empty.GetPixel(77, 346) &&
+                    full.GetPixel(170, 346) != quarter.GetPixel(170, 346),
                     "battery charge occupies exactly the first quarter at 25 percent independently of forecast coverage");
             }
             using (var a = new Bitmap(400, 350)) using (var b = new Bitmap(400, 350))
@@ -632,6 +633,24 @@ class CornerHudTests
                     if (a.GetPixel(x, y).A != b.GetPixel(x, y).A) maskChanges++;
                 Check(ImageChanges(a, b, new Rectangle(30, 295, 168, 55)) > 100 && maskChanges == 0,
                     "rainbow flows through fixed glyphs without moving or interpolating the percentage");
+            }
+            // Paint real glyphs at several DPIs, including their moving outgoing
+            // frame, so a future font/layout change cannot put text back in the cell.
+            foreach (float scale in new[] {1f, 1.25f, 1.5f, 2f})
+            foreach (double balance in new[] {100.0, 99.9, 9.9, 0.1, 0.0})
+            using (var ink = new Bitmap((int)(200 * scale), (int)(360 * scale)))
+            using (var g = Graphics.FromImage(ink))
+            {
+                g.ScaleTransform(scale, scale);
+                var digits = (ReadoutTransition)Field(hud, "quotaDigits");
+                digits.Set("100", "weekly", 900, false);
+                digits.Set(balance.ToString("0.#"), "weekly", 1000, true);
+                Set(hud, "previewMotionClock", 1080.0);
+                Call(hud, "PaintQuotaNumber", g, balance.ToString("0.#"), Field(hud, "cornerHeroFont"), balance, true);
+                int overlap = 0;
+                for (int y = (int)(340 * scale); y < ink.Height; y++)
+                    for (int x = 0; x < ink.Width; x++) if (ink.GetPixel(x, y).A > 0) overlap++;
+                Check(overlap == 0, "percentage and transition leave the battery clear at " + balance + "% / " + scale + "x");
             }
             Set(hud, "previewMotionClock", 1000.0); SavePreview(hud, Path.Combine(root, "build", "corner-spectrum-normal.png"));
             // Drive the actual painter from distinct measured headline rates.
@@ -734,7 +753,7 @@ class CornerHudTests
             Set(hud, "previewMotionClock", 1000.0);
             Set(hud, "motionAllowed", true); Call(hud, "UpdateMetrics");
             double coverageBefore = ((QuotaWeekScale)Field(hud, "quotaScale")).FutureCoverage;
-            Check(QuotaEffectChanges(hud, 2400, 2600, new Rectangle(40, 362, 140, 17)) > 40 &&
+            Check(QuotaEffectChanges(hud, 2400, 2600, new Rectangle(40, 373, 140, 13)) > 40 &&
                 ((QuotaWeekScale)Field(hud, "quotaScale")).FutureCoverage == coverageBefore,
                 "reset spectrum reaches the usable timeline without changing its duration or depletion position");
             var folder = Path.Combine(root, "build", "quota-spectrum-frames"); Directory.CreateDirectory(folder);
@@ -1114,7 +1133,7 @@ class CornerHudTests
                 for (int y = 484; y < 516; y++)
                     for (int x = 28; x < 60; x++)
                     {
-                        int px = (int)(x * a.Width / 400.0), py = (int)(y * a.Height / 738.0);
+                        int px = (int)(x * a.Width / 400.0), py = (int)(y * a.Height / 722.0);
                         var p = a.GetPixel(px, py); var q = b.GetPixel(px, py);
                         if (Math.Abs(p.R - q.R) + Math.Abs(p.G - q.G) + Math.Abs(p.B - q.B) > 6) changed++;
                     }
@@ -1444,6 +1463,47 @@ class CornerHudTests
         Set(hud, "nextMotionPreference", oldPreference);
         Set(hud, "motionAllowed", oldMotion);
         Set(hud, "previewMotionClock", null);
+    }
+
+    static void CheckGlobalInstrument(Hud hud, string root)
+    {
+        var original = Field(hud, "data");
+        var fixture = new Dictionary<string, object>((Dictionary<string, object>)original);
+        var oldClock = Field(hud, "previewMotionClock");
+        var oldMotion = Field(hud, "motionAllowed");
+        var oldPreference = Field(hud, "nextMotionPreference");
+        double now = (DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+        var frame = SpeedFixture(now, 100, .5);
+        frame["scope"] = "global"; frame["rate"] = 100.0; frame["average_30s"] = 82.3;
+        frame["generating"] = 2; frame["tools"] = 1; frame["complete"] = true;
+        fixture["updated_at_ms"] = now; fixture["global_speed"] = frame;
+        try
+        {
+            Set(hud, "motionAllowed", true); Set(hud, "nextMotionPreference", double.MaxValue);
+            Set(hud, "data", fixture); Set(hud, "previewMotionClock", 300000.0); Call(hud, "UpdateMetrics");
+            using (var first = QuotaEffectFrame(hud, 301000))
+            {
+                fixture["thread_id"] = "other-project"; fixture["title"] = "Other"; fixture["binding"] = "unbound";
+                Call(hud, "UpdateMetrics");
+                using (var second = QuotaEffectFrame(hud, 301000))
+                    Check(ImageChanges(first, second, new Rectangle(20, 70, 360, 178)) == 0,
+                        "switching projects does not clear, recolor or move the global instrument");
+            }
+            SavePreview(hud, Path.Combine(root, "build", "corner-global-speed.png"));
+            frame["rate"] = 130.0; Set(hud, "previewMotionClock", 301100.0);
+            SavePreview(hud, Path.Combine(root, "build", "corner-global-transition.png"));
+            Check(((ReadoutTransition)Field(hud, "speedDigits")).Moving(301200), "new global output still animates after a project switch");
+            frame["rate"] = 0.0; frame["generating"] = 0; frame["tools"] = 0; frame["state"] = "idle";
+            frame["estimated_share"] = 0.0; Set(hud, "previewMotionClock", 302000.0);
+            SavePreview(hud, Path.Combine(root, "build", "corner-global-idle.png"));
+            Check(((SpeedDisplay)Field(hud, "speedView")).Rate == 0, "global idle cannot keep advertising old throughput");
+        }
+        finally
+        {
+            Set(hud, "data", original); Set(hud, "previewMotionClock", oldClock);
+            Set(hud, "motionAllowed", oldMotion); Set(hud, "nextMotionPreference", oldPreference);
+            Call(hud, "UpdateMetrics");
+        }
     }
 
     static void SavePreview(Hud hud, string path)

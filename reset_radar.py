@@ -28,6 +28,7 @@ HOST = "didcodexreset.com"
 STATUS_PATH = "/openapi/v1/status?lang=zh-CN&timeZone=Asia%2FShanghai"
 META_PATH = "/openapi/v1/records/latest?kind=reset_completed"
 INTERVAL_SECONDS = 180
+METADATA_REFRESH_SECONDS = 12 * 60
 MIN_REFRESH_SECONDS = 60
 SOURCE_MAX_AGE_SECONDS = 30 * 60
 CLOCK_SKEW_SECONDS = 120
@@ -334,18 +335,46 @@ class _Round:
     not_before_ms: float = 0
 
 
-def _fetch_round(request=None) -> _Round:
+@dataclass
+class _MetadataCache:
+    signature: tuple | None = None
+    metadata: dict | None = None
+    checked_at_ms: float = 0
+
+
+def _fetch_round(request=None, cache: _MetadataCache | None = None) -> _Round:
     request = request or request_json
     try:
         status, headers = request(STATUS_PATH)
-        wait = _budget_wait(headers, time.time() * 1000)
-        if wait:
-            # A second request would exceed the shared anonymous IP allowance.
-            raise RadarError("rate_limited", wait)
-        metadata, headers = request(META_PATH)
         now_ms = time.time() * 1000
         wait = _budget_wait(headers, now_ms)
+        data = status.get("data") if isinstance(status, dict) and status.get("ok") is True else None
+        keys = ("latestGlobal", "latestBanked", "nextScheduled")
+        if not isinstance(data, dict) or not all(key in data for key in keys):
+            result = normalize_status(status, {}, now_ms)
+            result["next_check_at_ms"] = int(now_ms + max(INTERVAL_SECONDS, wait) * 1000)
+            return _Round(result, now_ms + wait * 1000 if wait else 0)
+        signature = tuple(data[key] for key in keys)
+        meta = cache.metadata if cache else None
+        source = _timestamp(meta.get("meta", {}).get("generatedAt")) if isinstance(meta, dict) else None
+        matching = (cache is not None and cache.signature == signature and source is not None and
+                    -CLOCK_SKEW_SECONDS * 1000 <= now_ms - source <= SOURCE_MAX_AGE_SECONDS * 1000 and
+                    0 <= now_ms - cache.checked_at_ms)
+        if wait and not matching:
+            # A second request would exceed the shared anonymous IP allowance.
+            raise RadarError("rate_limited", wait)
+        if matching and (wait or now_ms - cache.checked_at_ms < METADATA_REFRESH_SECONDS * 1000):
+            metadata = meta
+        else:
+            metadata, headers = request(META_PATH)
+            now_ms = time.time() * 1000
+            wait = _budget_wait(headers, now_ms)
         result = normalize_status(status, metadata, now_ms)
+        if cache is not None and metadata is not meta and result["state"] == "ok":
+            # Keep only public freshness metadata and the fields used by this HUD.
+            cache.signature = copy.deepcopy(signature)
+            cache.metadata = {"ok": True, "meta": {"generatedAt": metadata["meta"]["generatedAt"]}}
+            cache.checked_at_ms = now_ms
         result["next_check_at_ms"] = int(now_ms + max(INTERVAL_SECONDS, wait) * 1000)
         return _Round(result, now_ms + wait * 1000 if wait else 0)
     except RadarError as error:
@@ -365,15 +394,21 @@ def fetch_once(request=None) -> dict:
 
 
 class ResetRadarPoller:
-    """Nonblocking snapshots; 40 anonymous requests/hour at the default cadence."""
-    def __init__(self, interval: float = INTERVAL_SECONDS, *, sampler=None):
+    """Nonblocking snapshots with conservative public-metadata reuse."""
+    def __init__(self, interval: float = INTERVAL_SECONDS, *, sampler=None, resume=None):
         value = _number(interval)
         self.interval = max(INTERVAL_SECONDS, value) if value is not None else INTERVAL_SECONDS
-        self._sample = sampler or _fetch_round
+        cache = _MetadataCache()
+        self._sample = sampler or (lambda: _fetch_round(cache=cache))
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._state = _empty()
+        previous_until = _number(resume.get("next_check_at_ms")) if isinstance(resume, dict) else None
+        self._resume_until = previous_until if (previous_until and previous_until > time.time() * 1000 and
+            resume.get("state") == "limited" and resume.get("reason") == "rate_limited") else 0
+        if self._resume_until:
+            self._state.update(state="limited", reason="rate_limited", next_check_at_ms=int(self._resume_until))
         self._thread = threading.Thread(target=self._run, name="public-reset-radar", daemon=True)
         self._thread.start()
 
@@ -389,7 +424,8 @@ class ResetRadarPoller:
         self._wake.set()
 
     def _run(self):
-        due, blocked_until, last_started = 0.0, 0.0, float("-inf")
+        due, last_started = 0.0, float("-inf")
+        blocked_until = time.monotonic() + max(0, (self._resume_until - time.time() * 1000) / 1000)
         while not self._stop.is_set():
             remaining = max(due, blocked_until) - time.monotonic()
             if remaining > 0:

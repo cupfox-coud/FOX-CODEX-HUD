@@ -27,7 +27,7 @@ $taskActivityArgs = $taskArgs | ForEach-Object {
 if ($LASTEXITCODE -ne 0) { throw 'Activity tests failed to compile.' }
 & $taskActivityExe
 if ($LASTEXITCODE -ne 0) { throw 'Activity verification failed.' }
-foreach ($taskTestName in @('ResetRadarDisplayTests', 'ResetNotificationTests', 'SpeedDisplayTests')) {
+foreach ($taskTestName in @('ResetRadarDisplayTests', 'ResetNotificationTests', 'SpeedDisplayTests', 'ContextDisplayTests')) {
     $taskResetExe = Join-Path $taskOutput ($taskTestName + '.exe')
     $taskResetArgs = $taskArgs | ForEach-Object {
         if ($_ -eq '/main:CornerHudTests') { '/main:' + $taskTestName }

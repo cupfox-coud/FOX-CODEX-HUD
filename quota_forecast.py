@@ -65,6 +65,62 @@ def _round_hours(hours):
     return max(step, round(hours / step) * step)
 
 
+class QuotaPace:
+    """Trailing five-minute quota loss; inputs are official balance observations.
+
+    Interpolation only apportions a measured debit at the window boundary. It
+    does not infer quota cost from output tokens or invent per-second readings.
+    """
+    def __init__(self, samples=(), reset=None):
+        self.points = []
+        self.reset = None
+        if _number(reset):
+            for at, balance in samples[-400:]:
+                self.observe({'window_minutes': WINDOW_MINUTES, 'remaining_percent': balance,
+                              'resets_at': reset}, at)
+
+    def observe(self, window, at):
+        current = _window(window, at)
+        if current is None:
+            self.points, self.reset = [], None
+            return
+        balance, reset = current
+        if self.points and at <= self.points[-1][0]:
+            return
+        if (self.reset is None or abs(reset - self.reset) > RESET_TOLERANCE or
+                (self.points and (at - self.points[-1][0] > 180 or _refilled(self.points[-1][1], balance)))):
+            self.points = []
+        self.reset = reset
+        # A small upward correction must not be counted again on the next drop.
+        floor = min(balance, self.points[-1][1]) if self.points else balance
+        self.points.append((at, floor))
+        while len(self.points) > 2 and self.points[1][0] <= at - 300:
+            self.points.pop(0)
+        self.points = self.points[-400:]
+
+    def snapshot(self, now):
+        result = {'state': 'warming', 'method': 'official_balance_5m', 'rate_pct_per_hour': None,
+                  'sample_at_ms': self.points[-1][0] * 1000 if self.points else None,
+                  'window_seconds': 300, 'span_seconds': 0, 'reset_at': self.reset}
+        if not self.points:
+            return result
+        end, balance = self.points[-1]
+        if not _number(now) or now < end - 1 or now - end > 180 or now >= self.reset:
+            return dict(result, state='stale')
+        begin = max(self.points[0][0], end - 300)
+        span = end - begin
+        if span < 60:
+            return dict(result, span_seconds=span)
+        initial = self.points[0][1]
+        for (ta, a), (tb, b) in zip(self.points, self.points[1:]):
+            if ta <= begin <= tb:
+                initial = a + (b - a) * (begin - ta) / (tb - ta)
+                break
+        spent = max(0.0, initial - balance)
+        return dict(result, state='ready', rate_pct_per_hour=spent * 3600 / span,
+                    spent_percent=spent, span_seconds=span)
+
+
 class QuotaForecast:
     def __init__(self, codex_home: Path, history_file: Path | None = None):
         self.codex_home = Path(codex_home)

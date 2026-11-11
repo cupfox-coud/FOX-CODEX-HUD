@@ -65,6 +65,27 @@ class SpeedDisplayTests
         view = SpeedDisplay.Read(data, "current", now);
         Check(view.State == "range" && view.Value == "18.5" && view.Mode == "区间均速" && !view.Estimated, "confirmed ranges retain their qualified display mode");
         Check(SpeedDisplay.Format(12345) == "12.3k" && SpeedDisplay.Tokens(1200) == "1.2k", "large values remain within the instrument width");
+        var globalData = Fixture(now);
+        var globalFrame = new Dictionary<string, object>(Json.Object(Json.Object(globalData, "metrics"), "live_speed"));
+        globalFrame["scope"] = "global"; globalFrame["complete"] = true;
+        globalFrame["generating"] = 2; globalFrame["tools"] = 1;
+        globalFrame["rate"] = 100.0; globalFrame["average_30s"] = 83.0;
+        globalData["global_speed"] = globalFrame;
+        globalData["binding"] = "unbound"; globalData["title"] = "another project";
+        view = SpeedDisplay.Read(globalData, "current", now);
+        Check(view.Global && view.Ready && view.Rate == 100 && view.Generating == 2 && view.Tools == 1 && view.LastRate == 83,
+            "global throughput and task counts do not depend on the selected project's binding");
+        globalFrame["state"] = "tools"; globalFrame["rate"] = 0.0; globalFrame["generating"] = 0;
+        view = SpeedDisplay.Read(globalData, "current", now);
+        Check(view.Ready && view.Rate == 0 && view.Phase == "工具中", "all-global tool pause shows actual zero instead of a retained response speed");
+        globalFrame["state"] = "idle"; globalFrame["tools"] = 0;
+        Check(SpeedDisplay.Read(globalData, "current", now).Phase == "待机", "global idle is explicit");
+        globalFrame["complete"] = false;
+        Check(!SpeedDisplay.Read(globalData, "current", now).Ready, "incomplete discovery cannot pretend no tasks are producing");
+        globalFrame["rate"] = 100.0; globalFrame["state"] = "measured";
+        Check(SpeedDisplay.Read(globalData, "current", now).Mode == "部分采集", "partial coverage is qualified");
+        globalFrame["updated_at_ms"] = now - 3001;
+        Check(!SpeedDisplay.Read(globalData, "current", now).Ready, "stalled global frames never fall back to selected-session data");
         var rolling = new ReadoutTransition();
         rolling.Set("32.4", "a", 1000, true);
         Check(!rolling.Moving(1000), "initial values appear immediately without replaying a fake count-up");

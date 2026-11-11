@@ -8,6 +8,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -129,10 +130,90 @@ namespace CodexTokenHud
         internal bool Primary;
         internal AutomationElement RootElement;
         internal AutomationElement TitleElement;
+        internal string[] Fingerprints = new string[0];
     }
 
     internal static class Inspector
     {
+        internal static bool IsCodexWindow(IntPtr handle)
+        {
+            try { using (var process = Process.GetProcessById((int)Native.ProcessId(handle)))
+                return process.MainModule.FileName.IndexOf(@"\WindowsApps\OpenAI.Codex_", StringComparison.OrdinalIgnoreCase) >= 0;
+            } catch { return false; }
+        }
+
+        internal static ViewSnapshot Follow(ViewSnapshot previous, HashSet<string> titles, HashSet<string> duplicates)
+        {
+            // Other apps can obscure accessibility text. Keep the last proven
+            // view while Codex is in the background, including its fingerprints.
+            // Its measurements continue updating independently in the collector.
+            if (previous != null && Native.IsWindow(previous.Handle) &&
+                !IsCodexWindow(Native.GetForegroundWindow())) return previous;
+            var result = Find(previous, titles);
+            if (result != null && result.Primary && titles.Contains(result.Title))
+            {
+                if (duplicates.Contains(result.Title)) result.Fingerprints = VisibleFingerprints(result);
+                return result;
+            }
+            return previous != null && Native.IsWindow(previous.Handle) &&
+                !IsCodexWindow(Native.GetForegroundWindow()) ? previous : null;
+        }
+
+        internal static string[] VisibleFingerprints(ViewSnapshot view)
+        {
+            var hashes = new HashSet<string>();
+            try
+            {
+                var root = view.RootElement ?? AutomationElement.FromHandle(view.Handle);
+                var bounds = root.Current.BoundingRectangle;
+                double dpi = Native.Scale(view.Handle);
+                var cache = new CacheRequest();
+                cache.Add(AutomationElement.IsOffscreenProperty); cache.Add(AutomationElement.BoundingRectangleProperty);
+                using (cache.Activate())
+                using (var hash = SHA256.Create())
+                    foreach (AutomationElement element in root.FindAll(TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)))
+                    {
+                        var c = element.Cached;
+                        if (c.IsOffscreen || c.BoundingRectangle.IsEmpty ||
+                            c.BoundingRectangle.Top < bounds.Top + 108 * dpi ||
+                            c.BoundingRectangle.Left < bounds.Left + view.PaneLeft + 20 * dpi) continue;
+                        object pattern;
+                        if (!element.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) continue;
+                        foreach (var range in ((TextPattern)pattern).GetVisibleRanges())
+                        {
+                            string raw = range.GetText(12000);
+                            if (string.IsNullOrEmpty(raw) || raw.Length < 32) continue;
+                            string text = new string(raw.Normalize(NormalizationForm.FormKC).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+                            if (text.Length < 32) continue;
+                            foreach (string fragment in new[] { text.Substring(0, 32), text.Substring(text.Length - 32) })
+                                hashes.Add(BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(fragment))).Replace("-", "").ToLowerInvariant());
+                            if (hashes.Count >= 48) return hashes.OrderBy(h => h).Take(48).ToArray();
+                        }
+                    }
+            }
+            catch (Exception) { }
+            return hashes.OrderBy(h => h).ToArray();
+        }
+
+        internal static ViewSnapshot Foreground(ViewSnapshot previous, HashSet<string> titles)
+        {
+            IntPtr handle = Native.GetForegroundWindow();
+            if (handle == IntPtr.Zero || Native.IsIconic(handle)) return null;
+            try
+            {
+                using (var process = Process.GetProcessById((int)Native.ProcessId(handle)))
+                {
+                    if (process.ProcessName != "ChatGPT" && process.ProcessName != "Codex") return null;
+                    string path = process.MainModule.FileName;
+                    if (path.IndexOf(@"\WindowsApps\OpenAI.Codex_", StringComparison.OrdinalIgnoreCase) < 0) return null;
+                }
+                var result = previous != null && previous.Handle == handle ? ReadCached(previous, titles) : Read(handle, titles);
+                // Never guess a header, partial title or a recently active background chat.
+                return result.Primary && !string.IsNullOrEmpty(result.Title) && titles.Contains(result.Title) ? result : null;
+            }
+            catch { return null; }
+        }
         internal static ViewSnapshot Read(IntPtr handle, HashSet<string> titles)
         {
             var result = new ViewSnapshot { Handle = handle, ProcessId = Native.ProcessId(handle) };
@@ -611,7 +692,7 @@ namespace CodexTokenHud
             bool bindingChanged = SyncManualBinding();
             ConsumeShowRequest();
             if (!string.IsNullOrEmpty(manualBindingId)) UpdateView(null);
-            else if (configuration.CornerMode) UpdateView(null);
+            else if (configuration.CornerMode) UpdateView(cornerInspectedView);
             if (DateTime.UtcNow >= nextBackendCheck)
             {
                 nextBackendCheck = DateTime.UtcNow.AddSeconds(1);
@@ -626,19 +707,32 @@ namespace CodexTokenHud
                 }
                 catch { StartBackend(); }
             }
-            if (!configuration.CornerMode && string.IsNullOrEmpty(manualBindingId) && !inspecting && DateTime.UtcNow >= nextInspection)
+            if (string.IsNullOrEmpty(manualBindingId) && !inspecting && DateTime.UtcNow >= nextInspection)
             {
                 inspecting = true;
-                nextInspection = DateTime.UtcNow.AddMilliseconds(350);
+                nextInspection = DateTime.UtcNow.AddMilliseconds(configuration.CornerMode ? (renderMemory.Reduced ? 2000 : 600) : 350);
                 var known = new HashSet<string>(Json.List(data, "threads").Select(t => Json.Text(t, "title")));
-                var preferred = activityFollowing ? null : view;
+                var knownTitles = Json.Get(data, "known_titles") as IEnumerable;
+                if (knownTitles != null) foreach (object title in knownTitles) if (title is string) known.Add((string)title);
+                var duplicates = new HashSet<string>(Json.List(data, "threads").GroupBy(t => Json.Text(t, "title")).Where(g => g.Count() > 1).Select(g => g.Key));
+                if (Json.List(data, "matches").Count() > 1) duplicates.Add(Json.Text(data, "title"));
+                var preferred = configuration.CornerMode ? cornerInspectedView : activityFollowing ? null : view;
                 int generation = inspectionGeneration;
-                Task.Run(delegate { return Inspector.Find(preferred, known); }).ContinueWith(task => {
+                Task.Run(delegate { return configuration.CornerMode ? Inspector.Follow(preferred, known, duplicates) : Inspector.Find(preferred, known); }).ContinueWith(task => {
                     if (stopping || IsDisposed) return;
                     try { BeginInvoke(new Action(delegate {
                         inspecting = false;
                         if (generation == inspectionGeneration && string.IsNullOrEmpty(manualBindingId) &&
-                            task.Status == TaskStatus.RanToCompletion) UpdateView(task.Result);
+                            task.Status == TaskStatus.RanToCompletion)
+                        {
+                            if (configuration.CornerMode)
+                            {
+                                cornerInspectedView = task.Result;
+                                cornerViewObservedAt = EpochMs();
+                                UpdateView(cornerInspectedView);
+                            }
+                            else UpdateView(task.Result);
+                        }
                     })); } catch { }
                 });
             }
@@ -677,7 +771,7 @@ namespace CodexTokenHud
                     {"window", view == null ? 0L : view.Handle.ToInt64()}, {"title", selectedTitle},
                     {"thread_id", Json.Text(data, "thread_id")}, {"rate_text", rateText},
                     {"model_text", modelText}, {"cache_text", cacheText}, {"weekly_text", weeklyText},
-                    {"binding_mode", string.IsNullOrEmpty(manualBindingId) ? (activityFollowing ? "activity" : "auto") : "manual"},
+                    {"binding_mode", BindingMode},
                     {"follow_owner", FollowOwner}, {"updated_at_ms", EpochMs()},
                     {"awaiting_view", AwaitingView},
                     {"layout_mode", manualLayout ? "manual" : "auto"},
@@ -697,12 +791,18 @@ namespace CodexTokenHud
                     {"memory_available_physical_bytes", renderMemory.Last.PhysicalAvailable},
                     {"speed_state", speedView.State}, {"live_output_rate", speedView.LiveRate},
                     {"displayed_output_rate", speedView.Rate}, {"displayed_speed_mode", speedView.Mode},
+                    {"speed_scope", speedView.Global ? "global" : "conversation"},
+                    {"speed_generating", speedView.Generating}, {"speed_tools", speedView.Tools},
                     {"speed_estimated_share", speedView.Share}, {"speed_recent_rate", speedView.Recent},
                     {"speed_redline", configuration.SpeedRedline},
+                    {"context_ready", contextView.Ready}, {"context_percent", contextView.Percent},
+                    {"context_level", contextAlerts.Level}, {"context_hint", contextView.Hint},
+                    {"context_compacted", contextView.Compacted}, {"speed_spectrum", speedSpectrum},
                     {"account_quota", Json.Object(data, "account_quota")}, {"quota_cached", quotaCached},
                     {"quota_runway_state", quotaRunway.State}, {"quota_runway_text", quotaRunway.Text}, {"quota_runway_basis", quotaRunway.Basis},
                     {"quota_today_state", quotaToday.State}, {"quota_today_text", quotaToday.Text}, {"quota_today_remaining_percent", quotaToday.Remaining},
                     {"quota_today_spent_percent", quotaToday.Spent},
+                    {"quota_pace_state", quotaPace.State}, {"quota_pace_per_hour", quotaPace.Rate},
                     {"quota_consumed_since_reset_percent", quotaRunway.Consumed},
                     {"quota_scale_state", quotaScale.State}, {"quota_scale_now", quotaScale.Current}, {"quota_scale_end", quotaScale.End}, {"quota_scale_end_label", quotaScale.EndLabel},
                     {"quota_future_coverage", quotaScale.FutureCoverage},
@@ -778,6 +878,10 @@ namespace CodexTokenHud
             PositionHud();
         }
 
+        private ViewSnapshot cornerInspectedView;
+        private double cornerViewObservedAt;
+        private string BindingMode { get { return !string.IsNullOrEmpty(manualBindingId) ? "manual" :
+            activityFollowing ? "activity" : configuration.CornerMode ? "follow" : "auto"; } }
         private void UpdateView(ViewSnapshot snapshot)
         {
             var manual = Json.Read(Path.Combine(runtime, "manual-binding.json"));
@@ -785,7 +889,7 @@ namespace CodexTokenHud
             if (!string.IsNullOrEmpty(manualBindingId))
                 snapshot = new ViewSnapshot { Handle = Native.GetDesktopWindow(), Primary = true, Title = Json.Text(manual, "title") };
             else if ((configuration.CornerMode || !string.IsNullOrEmpty(FollowOwner) || IsStartupEnabled()) &&
-                (snapshot == null || (Native.ProcessId(Native.GetForegroundWindow()) != snapshot.ProcessId &&
+                (snapshot == null || (!configuration.CornerMode && Native.ProcessId(Native.GetForegroundWindow()) != snapshot.ProcessId &&
                  Native.ProcessId(Native.GetForegroundWindow()) != (uint)Process.GetCurrentProcess().Id && !menu.Visible)))
             {
                 activityFollowing = true;
@@ -794,17 +898,21 @@ namespace CodexTokenHud
                     Title = Json.Text(data, "binding_mode") == "activity" ? Json.Text(data, "title") : "" };
             }
             view = snapshot;
+            if (configuration.CornerMode && snapshot != null) waitingForAutoFocus = false;
             string title = snapshot == null ? "" : snapshot.Title ?? "";
             if (title != selectedTitle) pinnedId = null;
             selectedTitle = title;
-            string id = string.IsNullOrEmpty(manualBindingId) ? pinnedId : manualBindingId;
-            string key = title + "\n" + id + "\n" + activityFollowing;
+            string id = string.IsNullOrEmpty(manualBindingId) ? (configuration.CornerMode ? null : pinnedId) : manualBindingId;
+            string key = title + "\n" + id + "\n" + activityFollowing +
+                (configuration.CornerMode && !activityFollowing ? "\n" + cornerViewObservedAt : "");
             if (key == previousSelection) return;
             previousSelection = key;
             Json.Write(Path.Combine(runtime, "selection.json"), new Dictionary<string, object> {
                 {"title", title}, {"thread_id", id}, {"refresh_id", refreshId},
-                {"binding_mode", string.IsNullOrEmpty(manualBindingId) ? (activityFollowing ? "activity" : "auto") : "manual"},
-                {"window", snapshot == null ? 0L : snapshot.Handle.ToInt64()}});
+                {"binding_mode", BindingMode},
+                {"window", snapshot == null ? 0L : snapshot.Handle.ToInt64()},
+                {"view_fingerprints", snapshot == null ? new string[0] : snapshot.Fingerprints},
+                {"view_observed_at_ms", configuration.CornerMode ? cornerViewObservedAt : EpochMs()}});
         }
 
         private void RequestRefresh()
@@ -833,7 +941,8 @@ namespace CodexTokenHud
 
         private bool AwaitingView
         {
-            get { return view == null || !Native.IsWindow(view.Handle) || Native.IsIconic(view.Handle) || !Native.IsWindowVisible(view.Handle) ||
+            get { if (configuration.CornerMode && view != null && view.Primary && Native.IsWindow(view.Handle)) return false;
+                return view == null || !Native.IsWindow(view.Handle) || Native.IsIconic(view.Handle) || !Native.IsWindowVisible(view.Handle) ||
                 (waitingForAutoFocus && Native.ProcessId(Native.GetForegroundWindow()) != view.ProcessId); }
         }
 
@@ -973,13 +1082,20 @@ namespace CodexTokenHud
         private void UpdateMetrics()
         {
             UpdateAccountQuota();
-            activity = ActivityDisplay.Read(data, selectedTitle, EpochMs());
+            quotaPace = QuotaPaceDisplay.Read(Json.Object(data, "account_quota"), EpochMs());
+            var fallback = configuration.CornerMode && Json.Text(data, "binding") != "ok" ? Json.Object(data, "activity_fallback") : null;
+            activityUsesFallback = fallback != null;
+            var activityData = fallback ?? data;
+            string activityTitle = activityUsesFallback ? Json.Text(fallback, "title") : selectedTitle;
+            activity = ActivityDisplay.Read(activityData, activityTitle, EpochMs());
+            contextView = ContextDisplay.Read(data, selectedTitle, EpochMs());
+            contextAlerts.Observe(contextView, MotionMs);
             speedView = SpeedDisplay.Read(data, selectedTitle, EpochMs());
             UpdateResetRadar();
             bool bound = Json.Text(data, "title") == selectedTitle && Json.Text(data, "binding") == "ok";
             var metrics = bound ? Json.Object(data, "metrics") : null;
             var last = Json.Object(metrics, "last");
-            var display = MetricDisplay.Read(data, selectedTitle, EpochMs());
+            var display = MetricDisplay.Read(activityData, activityTitle, EpochMs());
             modelText = display.Model;
             if (last != null && !string.IsNullOrEmpty(Json.Text(last, "model")) && Json.Text(last, "model") != modelText) last = null;
             rateText = display.Rate;
@@ -995,7 +1111,7 @@ namespace CodexTokenHud
                 freshnessText = "自动跟随 · 可右键固定";
             }
             if (!string.IsNullOrEmpty(manualBindingId)) freshnessText = "固定 · " + freshnessText;
-            else if (activityFollowing) freshnessText = "最近任务 · " + freshnessText;
+            else if (activityFollowing || activityUsesFallback) freshnessText = "最近任务 · " + freshnessText;
             if (refreshRequestedAt != DateTime.MinValue)
             {
                 var ack = Json.Object(data, "refresh");
@@ -1298,10 +1414,10 @@ namespace CodexTokenHud
                     item.Click += delegate { SetCornerMotion(chosen); };
                 }
                 var redlineMenu = menu.Items.Add("速度仪表满刻度") as ToolStripMenuItem;
-                foreach (int redline in new[] {50, 100, 200, 400, 800, 2000})
+                foreach (int redline in new[] {50, 100, 200, 300, 400, 800, 2000})
                 {
                     int chosen = redline;
-                    var item = redlineMenu.DropDownItems.Add(redline + " tok/s" + (redline == 200 ? "（默认）" : "")) as ToolStripMenuItem;
+                    var item = redlineMenu.DropDownItems.Add(redline + " tok/s" + (redline == 300 ? "（默认）" : "")) as ToolStripMenuItem;
                     item.Checked = configuration.SpeedRedline == redline;
                     item.Click += delegate { configuration.SpeedRedline = chosen; configuration.SaveCornerSettings(); Invalidate(); };
                 }
@@ -1399,7 +1515,7 @@ namespace CodexTokenHud
             try { if (backend != null && !backend.HasExited) backend.Kill(); } catch { }
             smallFont.Dispose(); labelFont.Dispose(); speedFont.Dispose(); tooltip.Dispose(); tray.Dispose();
             cornerHeaderFont.Dispose(); cornerSmallFont.Dispose(); cornerSpeedFont.Dispose(); cornerCacheFont.Dispose(); cornerQuotaFont.Dispose();
-            cornerTimerFont.Dispose(); cornerNumberFont.Dispose(); cornerValueFont.Dispose(); cornerTitleFont.Dispose();
+            cornerTimerFont.Dispose(); cornerNumberFont.Dispose(); cornerValueFont.Dispose(); cornerMetricFont.Dispose(); cornerTitleFont.Dispose();
             cornerRadarFont.Dispose(); cornerRunwayFont.Dispose();
             instrumentFont.Dispose();
             cornerHeroFont.Dispose(); cornerBrandFont.Dispose(); cornerMicroFont.Dispose();
