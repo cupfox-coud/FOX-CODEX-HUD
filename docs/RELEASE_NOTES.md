@@ -1,11 +1,7 @@
-# FOX CODEX HUD · corner.55
+# FOX CODEX HUD · corner.56
 
-更新公共重置雷达的请求策略：保持每 3 分钟查询状态，信号未变时复用已验证的来源时间，并定期复核；信号变化、来源过期或缺失时重新核验。共享出口的限流仍以服务端规则为准，重启不跳过已知的限流等待。
+公共 API 报告共享额度剩余 1–5 次时，面板将下一轮查询延至 10 分钟后。限流期间，雷达以本机时间显示下次检查时间。全局重置和发卡仍各自显示对应预告。
 
-包含 corner.49–54 的全局多任务输出、会话上下文与 70% / 85% 交接提醒、跟随会话、额度消耗速度与今日建议、原有分组边界以及局部柔和加速扫光。全局重置和发卡继续分开提醒。
+![Windows 主面板，模拟数据](https://raw.githubusercontent.com/cupfox-coud/FOX-CODEX-HUD/main/docs/images/fox-hud-overview.png)
 
-![原生界面模拟动画](https://raw.githubusercontent.com/cupfox-coud/FOX-CODEX-HUD/main/docs/images/fox-hud-realtime.gif)
-
-[查看模拟截图与功能说明](https://github.com/cupfox-coud/FOX-CODEX-HUD/blob/main/docs/SHOWCASE.md)
-
-发布后，Windows x64 用户可下载 `FOX-CODEX-HUD-1.3.0-beta.8.corner.55-win-x64.zip` 与 SHA-256 校验文件。完整解压到固定目录后运行 `Install.ps1`，包内已包含 Python。公共重置信号不代表个人额度已经到账。
+[查看雷达状态与原生动效](https://github.com/cupfox-coud/FOX-CODEX-HUD/blob/main/docs/SHOWCASE.md)

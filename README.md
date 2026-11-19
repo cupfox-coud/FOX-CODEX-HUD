@@ -2,20 +2,20 @@
 
 一张轻量的 Windows 桌面悬浮面板，把 Codex 的全局输出、当前会话上下文、账户周额度、重置雷达和两条网络线路放在一起。
 
-**当前源码版本：1.3.0-beta.8.corner.55** · [现有发行版](https://github.com/cupfox-coud/FOX-CODEX-HUD/releases) · [功能图鉴](docs/SHOWCASE.md) · [中文使用说明](README.zh-CN.md)
+**当前源码版本：1.3.0-beta.8.corner.56** · [现有发行版](https://github.com/cupfox-coud/FOX-CODEX-HUD/releases) · [功能图鉴](docs/SHOWCASE.md) · [中文使用说明](README.zh-CN.md)
 
-<p align="center"><img src="docs/images/fox-hud-realtime.gif" width="320" alt="模拟多任务输出从 42 加速到 235 tok/s，仪表与周额度虹彩动态变化"></p>
+![Windows 主面板。右侧为原生界面，依次展示全局输出与上下文、周额度与雷达、双线路延迟。](docs/images/fox-hud-overview.png)
 
-<p align="center">原生界面演示 · 模拟数据，不包含真实会话或账户信息</p>
+[观看输出加速动效](docs/images/fox-hud-realtime.gif) · [查看原尺寸主界面](docs/images/fox-hud.png)
 
-## 一眼看懂当前状态
+## 重置雷达怎么看
 
-| 日常监测 | 全局额度重置 | 重置卡发放 |
+| 全局额度重置 | 重置卡发放 | 公共源限流 |
 | --- | --- | --- |
-| <img src="docs/images/fox-hud.png" width="240" alt="全局输出、会话上下文、周额度与双线路监测"> | <img src="docs/images/fox-hud-alert.png" width="240" alt="全局额度重置预告，额度区域联动提醒"> | <img src="docs/images/fox-hud-card-grant.png" width="240" alt="重置卡发放预告，明确不自动重置额度"> |
-| 输出、响应、上下文与额度分组展示。 | 确认属于全局额度重置时，才提示优先使用。 | 紫色发卡提示保留倒计时，不催促提前用完额度。 |
+| <img src="docs/images/fox-hud-alert.png" width="240" alt="全局额度重置预告及截止倒计时"> | <img src="docs/images/fox-hud-card-grant.png" width="240" alt="发卡预告，标有不自动重置额度"> | <img src="docs/images/fox-hud-limited.png" width="240" alt="公共源限流及下次自动检查的本地时间"> |
+| 看预告倒计时，安排剩余额度。 | 到时查看重置卡，周额度照常使用。 | 看「下次检查」时间，面板会自动重试。 |
 
-截图由当前原生绘制器和人工构造的样本生成。更多状态与动效说明见 [功能图鉴](docs/SHOWCASE.md)。
+截图均由当前 Windows 原生面板使用模拟数据绘制。
 
 ## 功能
 
@@ -28,13 +28,13 @@
 
 ## 下载与安装
 
-从 [GitHub Releases](https://github.com/cupfox-coud/FOX-CODEX-HUD/releases) 查看可用的预构建包和 SHA-256 校验文件，发行版版本可能落后于本页源码。需要 Windows 10/11 与 .NET Framework 4.x；预构建包自带 Python。若发行版尚无 corner.55，可用仓库源码和下方的 `Package.ps1` 构建；构建环境需要 Python。
+从 [GitHub Releases](https://github.com/cupfox-coud/FOX-CODEX-HUD/releases) 查看可用的预构建包和 SHA-256 校验文件，发行版版本可能落后于本页源码。需要 Windows 10/11 与 .NET Framework 4.x；预构建包自带 Python。若发行版尚无 corner.56，可用仓库源码和下方的 `Package.ps1` 构建；构建环境需要 Python。
 
 将完整包解压到固定目录（推荐 `%LOCALAPPDATA%\Programs\FOX-CODEX-HUD`），运行 `Install.ps1`。桌面快捷方式、开始菜单和登录启动指向同一个安装目录；详细步骤与排障见 [Windows 安装说明](docs/INSTALLATION.md)。右键托盘可调整动效、屏幕、透明度及会话绑定。
 
 ## 数据与限制
 
-雷达使用 [Did Codex Reset 公共 API](https://didcodexreset.com/zh/api.html)。状态每 3 分钟检查一次；信号不变时复用已验证的来源时间，约 12–15 分钟复核一次，常态约 25 次请求 / 小时。信号变化时会额外复核。该站对同一出口 IP 的所有客户端共享每小时 60 次限制；受限时遵守服务端的重试时间，不能保证共享出口一定有剩余额度。
+雷达使用 [Did Codex Reset 公共 API](https://didcodexreset.com/zh/api.html)。状态每 3 分钟检查一次；信号不变时复用已验证的来源时间，约 12–15 分钟复核一次，常态约 25 次请求 / 小时。信号变化时会额外复核。共享预算剩下 1–5 次时，下一轮自动检查延至 10 分钟后。该站对同一出口 IP 的所有客户端共享每小时 60 次限制；受限时遵守服务端的重试时间，不能保证共享出口一定有剩余额度。
 
 账户额度来自已登录 Codex 客户端；上下文和速度来自本地日志。公共雷达不接收账户、凭据或对话内容；双线路探测会访问公开的连接测试地址。具体数据处理、限制和本机保存内容见 [隐私说明](PRIVACY.md)。
 

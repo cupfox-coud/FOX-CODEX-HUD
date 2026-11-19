@@ -1139,7 +1139,7 @@ namespace CodexTokenHud
                     cornerMicroFont.FontFamily.GetEmHeight(cornerMicroFont.Style);
                 MovingText(g, transition, value, font, tone,
                     new RectangleF(bounds.X, baseline - ascent, bounds.Width - unitWidth - 3, font.GetHeight(g)),
-                    StringAlignment.Near, key);
+                    StringAlignment.Far, key);
                 CornerText(g, unit, cornerMicroFont, unitTone,
                     new RectangleF(bounds.Right - unitWidth, baseline - unitAscent, unitWidth + 2, cornerMicroFont.GetHeight(g)), false);
             }
@@ -1149,9 +1149,9 @@ namespace CodexTokenHud
         {
             Color paceTone = !quotaPace.Rate.HasValue || quotaPace.Cached ? Muted : Mix(Mint, Ink, .55);
             if (quotaToday.OverBudget) PaintTodayDebtSurface(g, clock);
-            CornerText(g, "消耗速度", cornerSmallFont, Muted, new RectangleF(PaceTile.X, 432, PaceTile.Width, 22), false);
+            CornerText(g, "消耗速度", cornerSmallFont, Muted, new RectangleF(PaceTile.X, 432, PaceTile.Width, 22), true);
             CornerText(g, quotaToday.OverBudget ? "今日超额" : "今日建议", cornerSmallFont, Muted,
-                new RectangleF(AdviceTile.X, 432, AdviceTile.Width, 22), false);
+                new RectangleF(AdviceTile.X, 432, AdviceTile.Width, 22), true);
             QuotaMetric(g, paceDigits, quotaPace.Value, "%/h", PaceTile, paceTone, Muted,
                 "quota-pace:" + quotaPace.Key + ":" + quotaPace.State);
             string advice = quotaToday.Remaining.HasValue ? quotaToday.Text.TrimEnd('%') : "—";
@@ -1165,11 +1165,11 @@ namespace CodexTokenHud
                 g.DrawLine(rule, PaceTile.Left, 499, PaceTile.Right, 499);
                 if (!quotaToday.OverBudget) g.DrawLine(rule, AdviceTile.Left, 499, AdviceTile.Right, 499);
             }
-            CornerText(g, quotaPace.Hint, cornerMicroFont, Muted, new RectangleF(PaceTile.X, 506, PaceTile.Width, 17), false);
+            CornerText(g, quotaPace.Hint, cornerMicroFont, Muted, new RectangleF(PaceTile.X, 506, PaceTile.Width, 17), true);
             CornerText(g, !quotaToday.Remaining.HasValue ? "等待同步" : quotaToday.Cached ? "上次采样" :
                 quotaToday.OverBudget ? "超出建议" : quotaToday.Remaining == 0 ? "建议已用完" : "建议余量",
                 cornerMicroFont, quotaToday.OverBudget ? DebtMetal : Muted,
-                new RectangleF(AdviceTile.X, 506, AdviceTile.Width, 17), false);
+                new RectangleF(AdviceTile.X, 506, AdviceTile.Width, 17), true);
         }
 
         private Color QuotaRunwayTone()

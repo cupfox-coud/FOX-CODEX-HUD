@@ -173,7 +173,15 @@ namespace CodexTokenHud
             if (state == "loading" || radar == null)
             { result.State = "loading"; result.Countdown = "正在同步"; reason = "等待公开排期"; }
             else if (state == "limited")
-            { result.State = "limited"; result.Countdown = "请求受限"; reason = "稍后自动重试"; }
+            {
+                result.State = "limited";
+                result.Countdown = "公共源限流";
+                double? retry = Number(radar, "next_check_at_ms");
+                reason = !Timestamp(retry) ? "稍后自动重试" : retry.Value <= nowMs ? "正在重新检查" :
+                    "下次检查 " + LocalDate(retry.Value).ToString(
+                        LocalDate(retry.Value).Date == LocalDate(nowMs).Date ? "HH:mm:ss" : "MM/dd HH:mm", CultureInfo.InvariantCulture);
+                result.CalendarLabel = reason;
+            }
             else if (state == "unavailable")
             { result.State = "unavailable"; result.Countdown = "暂时离线"; reason = "公开排期暂不可用"; }
             else if (state == "stale" || !Fresh(Number(radar, "fetched_at_ms"), nowMs, 900000) ||

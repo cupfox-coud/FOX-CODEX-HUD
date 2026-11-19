@@ -334,6 +334,19 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(calls.count(radar.STATUS_PATH), 20)
         self.assertEqual(calls.count(radar.META_PATH), 5)
 
+    def test_low_shared_budget_slows_next_poll_but_still_validates_the_signal(self):
+        for remaining, expected in (("5", 600), ("1", 600), ("6", 180), ("unknown", 180)):
+            with self.subTest(remaining=remaining):
+                calls = []
+                def request(path):
+                    calls.append(path)
+                    return (status(scheduled()) if path == radar.STATUS_PATH else meta()), {"x-ratelimit-remaining": remaining}
+                with patch.object(radar.time, "time", return_value=NOW / 1000):
+                    result = radar._fetch_round(request)
+                self.assertEqual(calls, [radar.STATUS_PATH, radar.META_PATH])
+                self.assertEqual(result.snapshot["state"], "ok")
+                self.assertEqual(result.snapshot["next_check_at_ms"], NOW + expected * 1000)
+
     def test_last_budget_slot_can_use_fresh_matching_cached_metadata(self):
         cache = radar._MetadataCache()
         calls, clock, exhausted = [], [NOW], [False]

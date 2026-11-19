@@ -1,5 +1,9 @@
 # Changelog
 
+## FOX CODEX HUD 1.3.0-beta.8.corner.56
+
+Slow public radar polling when only 1–5 requests remain on the shared IP. Show the local time of the next check during a cooldown. Align quota readings with their units in the two-column layout. Refresh the homepage with native Windows screenshots of the main panel, quota reset, card grant and rate limit.
+
 ## FOX CODEX HUD 1.3.0-beta.8.corner.55
 
 Keep the three-minute public reset status checks while reusing verified snapshot

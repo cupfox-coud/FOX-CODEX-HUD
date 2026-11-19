@@ -1,6 +1,6 @@
 # FOX CODEX HUD · 中文使用说明
 
-当前 Windows 卡片版本 **1.3.0-beta.8.corner.55**。项目独立维护，与 OpenAI 无隶属关系。[返回首页](README.md) · [下载与发行版](https://github.com/cupfox-coud/FOX-CODEX-HUD/releases) · [图文功能图鉴](docs/SHOWCASE.md)
+当前 Windows 卡片版本 **1.3.0-beta.8.corner.56**。项目独立维护，与 OpenAI 无隶属关系。[返回首页](README.md) · [下载与发行版](https://github.com/cupfox-coud/FOX-CODEX-HUD/releases) · [图文功能图鉴](docs/SHOWCASE.md)
 
 ## Windows 角落卡片
 
@@ -14,7 +14,7 @@
 
 周额度每 30 秒通过已登录客户端的官方账户接口核对，本地新额度快照可即时更新。近期消耗速度以最多 5 分钟内余额下降计算，单位 `%/h`；至少观察 1 分钟，采样不足或过期不会伪造 0。今日建议按本地自然日及官方周期重置重建，超额用负数显示；它是建议而非服务限制。详见 [额度说明](docs/QUOTA_RUNWAY.md)。
 
-公共雷达每 3 分钟检查状态；信号没有变化时使用已验证的新鲜度时间，约 12–15 分钟复核；信号变化会立即复核。常态约 25 次请求 / 小时（变化较多时更多），同一出口 IP 与其他客户端共享服务商的每小时 60 次限额。遇到限制会按服务端时间退避，重启不会跳过已知限流等待；不保证共享出口一定有剩余配额。未知、过期或不匹配的来源不产生行动建议。来源：[Did Codex Reset API](https://didcodexreset.com/zh/api.html)。
+公共雷达每 3 分钟检查状态；信号没有变化时使用已验证的新鲜度时间，约 12–15 分钟复核；信号变化会立即复核。常态约 25 次请求 / 小时（变化较多时更多），同一出口 IP 与其他客户端共享服务商的每小时 60 次限额。共享预算剩余 1–5 次时，下轮检查延至 10 分钟后。限流时雷达显示下次检查的本地时间，按服务端时间退避，重启不会跳过已知限流等待；不保证共享出口一定有剩余配额。未知、过期或不匹配的来源不产生行动建议。来源：[Did Codex Reset API](https://didcodexreset.com/zh/api.html)。
 
 当前会话跟随、同名会话处理与 70% / 85% 提醒详见 [上下文说明](docs/CONTEXT.md)；速率与动态表现详见 [速度说明](docs/SPEED.md)。主界面和运行数据见 [隐私说明](PRIVACY.md)。
 
@@ -46,7 +46,7 @@ python3 app_follow.py --disable
 
 `--run` 后的程序和参数原样传递，不修改 Codex、编辑器或 shell 配置。它和 `--client-executable` 为新增/改名客户端提供入口，但不会把不兼容的日志变成兼容格式。离线日志、历史导出和纯云端任务没有可跟随的本地客户端进程；离线兼容日志继续手动查看，纯云端记录仍不可测。
 
-**上游基础版本：1.3.0-beta.8；本仓库 Windows 卡片版本：1.3.0-beta.8.corner.55。** 独立开源项目，与 OpenAI 无隶属关系。只读本地日志，不改动 Codex 安装，不上传聊天内容。
+**上游基础版本：1.3.0-beta.8；本仓库 Windows 卡片版本：1.3.0-beta.8.corner.56。** 独立开源项目，与 OpenAI 无隶属关系。只读本地日志，不改动 Codex 安装，不上传聊天内容。
 
 ![Windows 状态栏](docs/images/hud.png)
 

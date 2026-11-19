@@ -74,7 +74,7 @@ class ContextLayoutTests
                 {"network_latency",new Dictionary<string,object>{{"state","ok"},{"updated_at_ms",now},
                     {"nodes",new object[]{Fixture("Node","ai",116,now),Fixture("Node","general",158,now)}}}}};
             Set(h,"data",data); Set(h,"previewMotionClock",10000.0); Call(h,"UpdateMetrics");
-            var output=Path.Combine(root,"build","corner55-review");Directory.CreateDirectory(output);
+            var output=Path.Combine(root,"build","corner56-review");Directory.CreateDirectory(output);
             if (args.Length > 2 && args[2] == "showcase")
             {
                 data["binding_mode"]="follow"; Set(h,"manualBindingId",null);
@@ -88,7 +88,10 @@ class ContextLayoutTests
                 Call(h,"UpdateMetrics");using(var a=Frame(h,11000)) a.Save(Path.Combine(output,"global.png"));
                 Json.Object(radar,"upcoming")["id"]="demo-banked"; Json.Object(radar,"upcoming")["reset_type"]="banked";
                 Call(h,"UpdateMetrics");using(var a=Frame(h,12000)) a.Save(Path.Combine(output,"banked.png"));
-                radar["upcoming"]=null; Call(h,"UpdateMetrics");
+                radar["state"]="limited"; radar["next_check_at_ms"]=now+600000; radar["upcoming"]=null;
+                Call(h,"UpdateMetrics");using(var a=Frame(h,12500)) {}
+                using(var a=Frame(h,13000)) a.Save(Path.Combine(output,"limited.png"));
+                radar["state"]="ok"; radar.Remove("next_check_at_ms"); Call(h,"UpdateMetrics");
                 var frames=Path.Combine(output,"frames"); Directory.CreateDirectory(frames);
                 for(int i=0;i<80;i++)
                 {

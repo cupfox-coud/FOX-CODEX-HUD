@@ -96,6 +96,15 @@ def _budget_wait(headers: dict, now_ms: float) -> float:
     return max(MIN_REFRESH_SECONDS, (reset - now_ms) / 1000) if reset else 3600
 
 
+def _poll_wait(headers: dict, now_ms: float) -> float:
+    # Leave the last few shared slots for other clients. A 200 stays usable.
+    try:
+        remaining = int(headers.get("x-ratelimit-remaining", "-1"))
+    except (TypeError, ValueError):
+        remaining = -1
+    return 600 if 1 <= remaining <= 5 else _budget_wait(headers, now_ms)
+
+
 def _https_proxy() -> str | None:
     """Honor HTTPS proxy/bypass settings, including the Windows system proxy.
 
@@ -368,7 +377,7 @@ def _fetch_round(request=None, cache: _MetadataCache | None = None) -> _Round:
         else:
             metadata, headers = request(META_PATH)
             now_ms = time.time() * 1000
-            wait = _budget_wait(headers, now_ms)
+        wait = _poll_wait(headers, now_ms)
         result = normalize_status(status, metadata, now_ms)
         if cache is not None and metadata is not meta and result["state"] == "ok":
             # Keep only public freshness metadata and the fields used by this HUD.

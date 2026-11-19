@@ -130,6 +130,17 @@ class ResetRadarDisplayTests
             Check(display.State == state && !display.Alert && !display.UpcomingStartMs.HasValue && display.Detail == "周重置 6天22时",
                 state + " disables old public schedule but can retain independently fresh official week");
         }
+        data = Fixture();
+        var limited = Json.Object(data, "reset_radar");
+        limited["state"] = "limited";
+        limited["next_check_at_ms"] = Now + 300000;
+        display = Read(data);
+        Check(display.CalendarLabel.StartsWith("下次检查 ") && !display.HasSignal && !display.CountingDown &&
+            !display.Alert, "shared-source cooldown is labeled as a retry, separate from weekly reset");
+        limited["next_check_at_ms"] = Now;
+        Check(Read(data).CalendarLabel == "正在重新检查", "elapsed cooldown does not promise a reset");
+        limited["next_check_at_ms"] = null;
+        Check(Read(data).CalendarLabel == "稍后自动重试", "unknown retry time is not fabricated");
         foreach (string field in new[] {"fetched_at_ms", "source_updated_at_ms"})
         {
             data = Fixture(); Upcoming(data, "exact", Now + 60000, null);
